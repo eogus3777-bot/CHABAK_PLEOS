@@ -1,0 +1,38 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--  기존 고캠핑 API / 날씨 조회 (현재 개발용 HTTP 서버 연결 포함)  -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="pleos.car.permission.NAVI_ROUTE"/>
+    <uses-permission android:name="pleos.car.permission.NAVI_ROUTE_SEARCH"/>
+    <!--  스마트 모닝: 알람 / 알림 / 백그라운드 자연음  -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <application android:allowBackup="true" android:label="CHABAK" android:supportsRtl="true" android:usesCleartextTraffic="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <!--  현재 Pleos에서 실행 중인 Compose 시작 화면  -->
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="SEARCH_CAMPING_PLACE"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </activity>
+        <!--  알람 시각에 울림 요청을 받는 수신기  -->
+        <receiver android:name=".ChabakMorningReceiver" android:exported="false"/>
+        <!--  기기 재시작/앱 업데이트 후 미래 알람 복원  -->
+        <receiver android:name=".ChabakMorningBootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED"/>
+            </intent-filter>
+        </receiver>
+        <!--  자연음 알람을 재생하는 포그라운드 서비스  -->
+        <service android:name=".ChabakMorningPlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback"/>
+    </application>
+</manifest>

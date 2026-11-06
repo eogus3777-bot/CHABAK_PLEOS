@@ -1,0 +1,65 @@
+{
+  "packageName": "com.chabak.app",
+  "appDescription": "CHABAK helps travelers find registered campsites for vehicle-based stays.",
+  "version": "1.0",
+  "invokeWord": "차박",
+  "actionCalls": [
+    {
+      "type": "function",
+      "function": {
+        "name": "SEARCH_CAMPING_PLACE",
+        "description": "Searches registered campsites in a selected region and displays matching places in CHABAK.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "region": {
+              "type": "string",
+              "description": "The broad region to search for campsites.",
+              "enum": [
+                "전국",
+                "경기",
+                "강원",
+                "충청",
+                "경상",
+                "전라",
+                "제주"
+              ]
+            },
+            "district": {
+              "type": "string",
+              "description": "The optional city or district within the selected region."
+            },
+            "nature": {
+              "type": "string",
+              "description": "The optional registered natural setting of the campsite.",
+              "enum": [
+                "숲",
+                "산",
+                "계곡",
+                "바다",
+                "강",
+                "호수"
+              ]
+            },
+            "toilet": {
+              "type": "boolean",
+              "description": "Whether registered toilets are required."
+            },
+            "electric": {
+              "type": "boolean",
+              "description": "Whether registered electricity facilities are required."
+            },
+            "store": {
+              "type": "boolean",
+              "description": "Whether a registered shop or convenience store is required."
+            }
+          },
+          "required": [
+            "region"
+          ]
+        },
+        "component": "activity"
+      }
+    }
+  ]
+}
