@@ -133,15 +133,10 @@ class TripTravelInstrumentedTest {
         assertEquals(TravelInteraction.UNKNOWN, travelInteraction(true, null))
         assertEquals(TravelInteraction.RESTRICTED, travelInteraction(true, true))
         assertEquals(TravelInteraction.ALLOWED, travelInteraction(true, false))
-        val html = """
-            <h1>테스트 캠핑장</h1><span>경기도 테스트로 1</span>
-            var lng = "127.57";
-            var lat = "37.47";
-            var position = new naver.maps.LatLng(lat, lng);
-        """.trimIndent()
-        assertEquals(camp, CampsiteCoordinates.parseMapCoordinates(html, fixturePlace()))
-        assertNull(CampsiteCoordinates.parseMapCoordinates(html, fixturePlace().copy(address = "경기 다른길 1")))
-        assertNull(CampsiteCoordinates.parseMapCoordinates(html + """var lat = "36";""", fixturePlace()))
+        assertEquals(camp, CampsiteCoordinates.from(37.47, 127.57))
+        assertNull(CampsiteCoordinates.from(127.57, 37.47))
+        assertNull(CampsiteCoordinates.from(37.47, 0.0))
+        assertNull(CampsiteCoordinates.from(Double.NaN, 127.57))
         assertFalse(origin.matches(camp))
     }
 

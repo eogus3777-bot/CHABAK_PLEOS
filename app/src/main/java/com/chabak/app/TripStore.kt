@@ -22,7 +22,9 @@ internal data class Trip(
     val packedItemIds: Set<String> = emptySet(),
     val extraItems: List<String> = emptyList(),
     val travel: TripTravel = TripTravel(),
-    val energyPlan: TripEnergyPlan = TripEnergyPlan()
+    val energyPlan: TripEnergyPlan = TripEnergyPlan(),
+    val wakeMinuteOfDay: Int? = null,
+    val diary: TripDiary = TripDiary()
 ) {
     fun withPlace(place: Place): Trip = copy(
         place = place,
@@ -39,7 +41,7 @@ internal data class TripCatalog(val trips: List<Trip>, val activeTripId: String)
 }
 
 internal class TripStore(context: Context, databaseName: String = "chabak_trips.db") :
-    SQLiteOpenHelper(context.applicationContext, databaseName, null, 3) {
+    SQLiteOpenHelper(context.applicationContext, databaseName, null, 5) {
 
     override fun onConfigure(db: SQLiteDatabase) {
         db.setForeignKeyConstraintsEnabled(true)
@@ -59,7 +61,9 @@ internal class TripStore(context: Context, databaseName: String = "chabak_trips.
                 travel TEXT NOT NULL DEFAULT '{}',
                 energy_hours INTEGER NOT NULL DEFAULT 8 CHECK (energy_hours IN (6, 8, 10)),
                 energy_minimum INTEGER NOT NULL DEFAULT 30 CHECK (energy_minimum BETWEEN 1 AND 100),
-                energy_power_kw REAL CHECK (energy_power_kw BETWEEN 0 AND 50)
+                energy_power_kw REAL CHECK (energy_power_kw BETWEEN 0 AND 50),
+                wake_minute_of_day INTEGER CHECK (wake_minute_of_day BETWEEN 0 AND 1439),
+                diary TEXT NOT NULL DEFAULT '{}'
             )
             """.trimIndent()
         )
@@ -82,6 +86,12 @@ internal class TripStore(context: Context, databaseName: String = "chabak_trips.
             db.execSQL("ALTER TABLE trips ADD COLUMN energy_minimum INTEGER NOT NULL DEFAULT 30 CHECK (energy_minimum BETWEEN 1 AND 100)")
             db.execSQL("ALTER TABLE trips ADD COLUMN energy_power_kw REAL CHECK (energy_power_kw BETWEEN 0 AND 50)")
         }
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE trips ADD COLUMN wake_minute_of_day INTEGER CHECK (wake_minute_of_day BETWEEN 0 AND 1439)")
+        }
+        if (oldVersion < 5) {
+            db.execSQL("ALTER TABLE trips ADD COLUMN diary TEXT NOT NULL DEFAULT '{}'")
+        }
     }
 
     fun loadOrMigrate(legacyTrip: () -> Trip): TripCatalog = transaction {
@@ -102,7 +112,9 @@ internal class TripStore(context: Context, databaseName: String = "chabak_trips.
             packedItemIds = emptySet(),
             extraItems = emptyList(),
             travel = TripTravel(),
-            energyPlan = TripEnergyPlan()
+            energyPlan = TripEnergyPlan(),
+            wakeMinuteOfDay = null,
+            diary = TripDiary()
         )
         insertOrThrow("trips", null, newTrip.toValues())
         setActiveTrip(newTrip.tripId)
@@ -205,6 +217,8 @@ private fun Trip.toValues() = ContentValues().apply {
     put("energy_hours", energyPlan.overnightHours)
     put("energy_minimum", energyPlan.minimumPercent)
     put("energy_power_kw", energyPlan.estimatedPowerKw)
+    put("wake_minute_of_day", wakeMinuteOfDay)
+    put("diary", diary.toJson())
 }
 
 private fun Cursor.toTrip(): Trip {
@@ -225,7 +239,9 @@ private fun Cursor.toTrip(): Trip {
             overnightHours = getInt(getColumnIndexOrThrow("energy_hours")),
             minimumPercent = getInt(getColumnIndexOrThrow("energy_minimum")),
             estimatedPowerKw = getColumnIndexOrThrow("energy_power_kw").let { if (isNull(it)) null else getDouble(it) }
-        )
+        ),
+        wakeMinuteOfDay = getColumnIndexOrThrow("wake_minute_of_day").let { if (isNull(it)) null else getInt(it) },
+        diary = TripDiary.read(text("diary"))
     )
 }
 
@@ -253,6 +269,7 @@ private fun Place.toJson(): JSONObject = JSONObject()
     .put("kind", kind.name)
     .put("permit", permit?.toJson() ?: JSONObject.NULL)
     .put("sourceUpdatedAt", sourceUpdatedAt)
+    .put("coordinates", coordinates?.toJson() ?: JSONObject.NULL)
 
 private fun JSONObject.toPlace(): Place {
     val id = optString("id")
@@ -287,6 +304,9 @@ private fun JSONObject.toPlace(): Place {
         overnightAllowed = opt("overnightAllowed") as? Boolean,
         kind = kind,
         permit = optJSONObject("permit")?.let(CampingPermit::read),
-        sourceUpdatedAt = stringField("sourceUpdatedAt")
+        sourceUpdatedAt = stringField("sourceUpdatedAt"),
+        coordinates = optJSONObject("coordinates")?.let {
+            CampsiteCoordinates.from(it.optDouble("latitude"), it.optDouble("longitude"))
+        }
     )
 }

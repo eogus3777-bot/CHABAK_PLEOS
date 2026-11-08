@@ -10,11 +10,15 @@ internal data class TripEnergyPlan(
         require(estimatedPowerKw == null || estimatedPowerKw in 0.0..MAX_POWER_KW)
     }
 
+    fun availablePercent(soc: Int?): Int? =
+        soc?.takeIf { it in 0..100 }?.let { (it - minimumPercent).coerceAtLeast(0) }
+
+    // Only call with a verified power input, or with an explicitly simulated scenario.
     fun estimate(soc: Int?, capacityKwh: Double?): StayEnergyEstimate? {
         val powerKw = estimatedPowerKw ?: return null
         val use = powerKw * overnightHours
         if (soc == null || soc !in 0..100 || capacityKwh == null || !capacityKwh.isFinite() || capacityKwh <= 0) {
-            return StayEnergyEstimate(use)
+            return null
         }
         val endKwh = capacityKwh * (soc / 100.0) - use
         val minimumKwh = capacityKwh * (minimumPercent / 100.0)
@@ -38,7 +42,7 @@ internal data class TripEnergyPlan(
 
 internal data class StayEnergyEstimate(
     val useKwh: Double,
-    val endPercent: Double? = null,
-    val minimumMarginKwh: Double? = null,
+    val endPercent: Double,
+    val minimumMarginKwh: Double,
     val hoursUntilMinimum: Double? = null
 )

@@ -85,12 +85,18 @@ internal fun TripTravelScreen(trip: Trip, campsite: Place?, save: (String, TripT
         if (!ready || busy || gate.current() != TravelInteraction.ALLOWED || campsite == null) return
         busy = true
         scope.launch {
-            val camp = travel.campsitePoint ?: withContext(Dispatchers.IO) {
+            val savedCamp = travel.campsitePoint?.let { CampsiteCoordinates.from(it.latitude, it.longitude) }
+            val camp = campsite.coordinates ?: savedCamp ?: withContext(Dispatchers.IO) {
                 runCatching { CampsiteCoordinates.forPlace(campsite) }.getOrNull()
             }
             if (camp == null || gate.current() != TravelInteraction.ALLOWED) {
-                status = if (camp == null) "캠핑장 좌표를 확인할 수 없어요. 고캠핑 공식 조회에서 캠핑장을 다시 선택해 주세요."
+                status = if (camp == null) "캠핑장 공식 좌표를 확인할 수 없어요. 고캠핑 서버와 장소 정보를 확인해 주세요."
                     else "이동 중에는 내비 요청을 제한해요."
+                busy = false
+                return@launch
+            }
+            val travelWithPoint = travel.withCampsitePoint(camp)
+            if (travelWithPoint != travel && !save(trip.tripId, travelWithPoint)) {
                 busy = false
                 return@launch
             }
@@ -100,7 +106,7 @@ internal fun TripTravelScreen(trip: Trip, campsite: Place?, save: (String, TripT
                     busy = false
                     return@currentLocation
                 }
-                var plan = travel.withCampsitePoint(camp)
+                var plan = travelWithPoint
                 val current = location?.point
                 if (direction == TravelLeg.OUTBOUND && plan.origin == null && location != null) {
                     plan = plan.withOrigin(location)

@@ -81,7 +81,8 @@ internal data class CampingCriteria(
     val store: Boolean = false,
     val quiet: Boolean = false,
     val evCharging: Boolean = false,
-    val kind: CampingPlaceKind = CampingPlaceKind.CAMPGROUND
+    val kind: CampingPlaceKind = CampingPlaceKind.CAMPGROUND,
+    val shower: Boolean = false
 ) {
     fun matches(place: Place): Boolean {
         val location = "${place.name} ${place.address} ${place.detail}"
@@ -89,7 +90,8 @@ internal data class CampingCriteria(
         val natureMatches = nature.isBlank() || nature in tags || (nature == "바다" && "해변" in tags)
         return kind == place.kind && (region == "전국" || region == place.region) &&
             (district.isBlank() || location.contains(district, ignoreCase = true)) && natureMatches &&
-            (!toilet || place.hasToilet()) && (!campingPower || place.campingPower == true) &&
+            (!toilet || place.hasToilet()) && (!shower || (place.showerCount ?: 0) > 0) &&
+            (!campingPower || place.campingPower == true) &&
             (!store || place.hasShop()) &&
             (!evCharging || place.onsiteEvCharger == true || place.nearbyEvCharger == true)
     }
@@ -107,6 +109,12 @@ internal object GoCampingCatalog {
         read("/camps", mapOf("region" to region, "q" to query, "limit" to "150"))
     )
 
+    fun coordinatesFor(place: Place): TravelPoint? {
+        if (!place.live || place.kind != CampingPlaceKind.CAMPGROUND || !goCampingId.matches(place.id)) return null
+        val match = decodeList(read("/camps", mapOf("id" to place.id, "limit" to "1"))).places
+        return match.singleOrNull { it.id == place.id }?.coordinates
+    }
+
     fun recommend(criteria: CampingCriteria): CampingRecommendations {
         if (criteria.evCharging) return CampingRecommendations(
             emptyList(), listOf("고캠핑 자료에서 차량 충전소를 확인할 수 없어 충전 필수 조건의 후보를 표시할 수 없어요.")
@@ -116,6 +124,7 @@ internal object GoCampingCatalog {
             "district" to criteria.district,
             "nature" to criteria.nature,
             "toilet" to flag(criteria.toilet),
+            "shower" to flag(criteria.shower),
             "electric" to flag(criteria.campingPower),
             "store" to flag(criteria.store),
             "quiet" to flag(criteria.quiet),
@@ -167,7 +176,8 @@ internal object GoCampingCatalog {
             showerCount = item.facilityCount("showers"), sinkCount = item.facilityCount("sinks"),
             website = item.stringField("website"), reservationUrl = item.stringField("reservationUrl"),
             siteType = item.stringField("type"), businessStatus = item.stringField("status"), live = true,
-            sourceUpdatedAt = timestamp
+            sourceUpdatedAt = timestamp,
+            coordinates = CampsiteCoordinates.from(item.optDouble("mapY"), item.optDouble("mapX"))
         )
     }
 

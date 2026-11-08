@@ -2,14 +2,11 @@ package com.chabak.app
 
 import android.content.Context
 import android.content.Intent
-import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
-import org.json.JSONTokener
 
 internal object GleoCampingAction {
     const val ACTION = "SEARCH_CAMPING_PLACE"
-    private const val RESPONSE_ACTION = "ai.pleos.playground.intent.action.APP_ACTION_RESPONSE"
     private val regions = setOf("전국", "경기", "강원", "충청", "경상", "전라", "제주")
     private val environments = setOf("숲", "산", "계곡", "바다", "강", "호수")
 
@@ -68,64 +65,20 @@ internal object GleoCampingAction {
         }
     }
 
-    private fun parameters(intent: Intent): JSONObject {
-        val extras = intent.extras ?: return JSONObject()
-        if (!extras.containsKey("ACTION_PARAM")) {
-            // The Gleo Intent guide also describes parameters as individual extras.
-            return JSONObject().apply {
-                for (name in listOf("region", "district", "nature", "toilet", "electric", "store")) {
-                    @Suppress("DEPRECATION")
-                    val value = extras.get(name)
-                    if (value != null) put(name, value)
-                }
-            }
-        }
+    private fun parameters(intent: Intent): JSONObject =
+        GleoContract.parameters(intent, listOf("region", "district", "nature", "toilet", "electric", "store"))
 
-        val raw = requireNotNull(extras.getString("ACTION_PARAM"))
-        val first = JSONTokener(raw).nextValue()
-        return when (first) {
-            is JSONObject -> first
-            is String -> JSONObject(first)
-            else -> throw IllegalArgumentException("Expected a parameter object")
-        }
-    }
-
-    private fun JSONObject.readText(name: String): String {
-        if (!has(name)) return ""
-        val value = get(name)
-        require(value is String)
-        return value.trim()
-    }
-
-    private fun JSONObject.readFlag(name: String): Boolean {
-        if (!has(name)) return false
-        val value = get(name)
-        require(value is Boolean)
-        return value
-    }
+    private fun JSONObject.readText(name: String): String = GleoContract.text(this, name)
+    private fun JSONObject.readFlag(name: String): Boolean = GleoContract.flag(this, name)
 
     private fun respond(
-        context: Context,
-        status: String,
-        message: String,
-        reason: String,
+        context: Context, status: String, message: String, reason: String,
         places: List<String> = emptyList()
     ) {
-        val result = JSONObject().put("reason", reason)
+        val details = JSONObject()
         if (places.isNotEmpty()) {
-            result.put("resultCount", places.size)
-            result.put("placeNames", JSONArray(places.take(3)))
+            details.put("resultCount", places.size).put("placeNames", JSONArray(places.take(3)))
         }
-        val response = JSONObject()
-            .put("functionName", ACTION)
-            .put("status", status)
-            .put("message", message)
-            .put("data", JSONArray().put(result).toString())
-
-        context.sendBroadcast(Intent(RESPONSE_ACTION).apply {
-            putExtra("packageName", context.packageName)
-            putExtra("response", response.toString())
-        })
-        Log.d("ChabakGleo", "$ACTION status=$status reason=$reason count=${places.size}")
+        GleoContract.reply(context, ACTION, status, message, reason, details)
     }
 }

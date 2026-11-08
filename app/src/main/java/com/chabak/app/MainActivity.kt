@@ -1,6 +1,7 @@
 package com.chabak.app
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.DatePickerDialog
 import android.app.AlarmManager
 import android.app.PendingIntent
@@ -30,8 +31,12 @@ import android.os.Looper
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
@@ -42,6 +47,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollState
@@ -73,7 +79,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.time.LocalDate
@@ -89,14 +98,14 @@ import kotlin.math.max
 // 기존 CHABAK 3.8 입지 판정, 추천 서버, 준비물 자동화는 유지합니다.
 // 시안 이미지에서 참고한 그래픽들은 사용자 제공 이미지에서 파생된 샘플 에셋입니다.
 // 캠핑장: 고캠핑 API 프록시 서버 연결 기능 추가. 예약/차량/음원 서비스는 아직 연동되지 않았습니다.
-private val Midnight = Color(0xFF071C2B)
-private val Pine = Color(0xFF11382F)
+private val Midnight = ChabakDesign.background
+private val Pine = Color(0xFF123B2B)
 private val Frost = Color(0xFFFFFFFF)
 private val Mint = Color(0xFFADD6A7)
-internal val Gold = Color(0xFFFFD083)
-private val Glass = Color(0x20FFFFFF) // 약 12.5% 불투명 흰색 유리
-private val GlassBorder = Color(0x65FFFFFF)
-private val Muted = Color(0xFFF1F4F3)
+internal val Gold = ChabakDesign.accent
+private val Glass = Color(0x241B513C) // 자연 배경이 비치는 흰색 유리
+private val GlassBorder = ChabakDesign.border
+private val Muted = ChabakDesign.muted
 
 // STEP042 — 한국 캠핑 서비스 시연 기준: 기기의 UTC 설정과 무관하게 한국 표준시(KST) 사용.
 // 정식 글로벌 서비스에서는 캠핑장 목적지/차량의 시간대를 적용할 수 있도록 분리합니다.
@@ -104,28 +113,25 @@ private val ChabakTimeZone = java.time.ZoneId.of("Asia/Seoul")
 private val ChabakLegacyTimeZone = java.util.TimeZone.getTimeZone("Asia/Seoul")
 private fun chabakNow(): LocalDateTime = LocalDateTime.now(ChabakTimeZone)
 // 아침 인사는 05:00~10:59에만 표시합니다.
-private data class TimeScene(val index: Int, val name: String, val greeting: String)
-private fun timeScene(hour: Int): TimeScene = when (hour) {
-    in 5..10 -> TimeScene(0, "아침", "좋은 아침이에요 ☀️")
-    in 11..16 -> TimeScene(1, "낮", "오늘도 즐거운 차박 되세요!")
-    in 17..19 -> TimeScene(2, "노을", "아름다운 저녁이에요 🌇")
-    else -> TimeScene(3, "밤", "편안한 밤 보내세요 🌙")
-}
 private fun isMorningTime(): Boolean = chabakNow().hour in 5..10
 
 class MainActivity : ComponentActivity() {
     // 알람 알림을 누르고 이미 실행 중인 앱으로 돌아왔을 때도 화면 변경 이벤트를 전달합니다.
     private var newAlarmIntentSerial by mutableIntStateOf(0)
     private val gleoIntents = Channel<Intent>(Channel.UNLIMITED)
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) ScenicBitmapCache.clear()
+    }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.action == GleoCampingAction.ACTION) gleoIntents.trySend(intent)
+        if ((intent.action == GleoCampingAction.ACTION || intent.action in GleoTripAction.actions)) gleoIntents.trySend(intent)
         else newAlarmIntentSerial++
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (savedInstanceState == null && intent.action == GleoCampingAction.ACTION) {
+        if (savedInstanceState == null && (intent.action == GleoCampingAction.ACTION || intent.action in GleoTripAction.actions)) {
             gleoIntents.trySend(intent)
         }
         window.statusBarColor = android.graphics.Color.rgb(6, 23, 34)
@@ -148,7 +154,8 @@ internal data class Place(
     val overnightAllowed: Boolean? = null,
     val kind: CampingPlaceKind = CampingPlaceKind.CAMPGROUND,
     val permit: CampingPermit? = null,
-    val sourceUpdatedAt: String = ""
+    val sourceUpdatedAt: String = "",
+    val coordinates: TravelPoint? = null
 )
 // 한국관광공사 고캠핑 공개 기록(2026-09-23 수집본)에 등장하는 실제 캠핑장 일부.
 // 조회 서버 미연결 시에만 노출하는 참고 목록이며 실시간 영업/빈자리 정보는 아닙니다.
@@ -178,7 +185,7 @@ internal fun storedCampsitePicture(id: String, theme: String): Int =
         else -> R.drawable.chabak_lakeside_car
     }
 
-private data class DiaryEntry(val title: String, val date: String, val place: String, val mood: String,
+internal data class DiaryEntry(val title: String, val date: String, val place: String, val mood: String,
                               val note: String, val photoUri: String = "")
 private data class PlacePreview(val place: Place, val date: LocalDate)
 private data class ReviewedStay(val visitDate: LocalDate, val nights: Int, val checkedOn: LocalDate)
@@ -199,11 +206,43 @@ private class AppState(private val context: Context) {
 
     val savedTrips: List<Trip> get() = tripCatalog.trips
     val activeTrip: Trip get() = tripCatalog.activeTrip
+    var nearbyQuery by mutableStateOf(NearbyQuery(TripPlaceCategory.MARKET, VisitWindow(activeTrip.visitDate)))
+    var nearbyResult by mutableStateOf<NearbyResult?>(null)
+    var nearbyLoading by mutableStateOf(false)
+    private var nearbySerial = 0
+
+    suspend fun searchNearby(query: NearbyQuery): NearbyResult {
+        val trip = activeTrip
+        val serial = ++nearbySerial
+        nearbyQuery = query
+        nearbyLoading = true
+        navigate("nearby")
+        val result = try {
+            withContext(Dispatchers.IO) { TripPlacesCatalog(context).search(trip, query) }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            NearbyResult(trip.tripId, query, NearbyStatus.SERVICE_FAILURE, "공식 장소 자료를 읽을 수 없어요.")
+        } finally {
+            if (serial == nearbySerial) nearbyLoading = false
+        }
+        if (serial != nearbySerial || activeTrip.tripId != trip.tripId) {
+            return NearbyResult(trip.tripId, query, NearbyStatus.SUPERSEDED, "선택한 여행이나 검색이 변경됐어요.")
+        }
+        nearbyResult = result
+        return result
+    }
 
     var page by mutableStateOf("home")
     val route = mutableStateListOf<String>()
     // -1이면 자동: 앱 실행 중에도 시간대에 맞춰 배경이 변경됩니다.
-    var themeIndex by mutableIntStateOf(-1)
+    var themeIndex by mutableIntStateOf(pref.getInt("natureThemeIndex", -1).coerceIn(-1, 3))
+        private set
+
+    fun selectTheme(index: Int) {
+        themeIndex = index.coerceIn(-1, 3)
+        pref.edit().putInt("natureThemeIndex", themeIndex).apply()
+    }
     var wakeScenePreview by mutableStateOf(false)
     var wakeSceneLive by mutableStateOf(false)
     var wakeQuickMode by mutableStateOf(false) // 아침 이외에는 즉시 화면 전환
@@ -211,16 +250,17 @@ private class AppState(private val context: Context) {
     var selectedWakeTrackUri by mutableStateOf(pref.getString("wakeMusicUri", "") ?: "")
     var wakeTransitionSerial by mutableIntStateOf(0)
     // 기기 차량 정차 여부를 아직 알 수 없으므로 자동 화면 전환은 사용자 선택 시에만 활성화.
-    var sunriseForegroundOptIn by mutableStateOf(pref.getBoolean("sunriseForegroundOptIn", false))
+    var sunriseForegroundOptIn by mutableStateOf(pref.getBoolean("sunriseForegroundOptIn", true))
     var region by mutableStateOf(pref.getString("region", "경기") ?: "경기")
     val pickedPlaceId: String get() = activeTrip.place.id
     var places by mutableStateOf(referencePlaces)
-    var livePlacesLoaded by mutableStateOf(false)
     var campsLoading by mutableStateOf(false)
     var campsMessage by mutableStateOf("내장 참고 목록 · 2026-09-23 수집")
     var requiresToilet by mutableStateOf(false)
     var requiresElectric by mutableStateOf(false)
     private var campsSeq = 0
+    private var campsInFlight: Pair<String, String>? = null
+    private var lastCamps: Pair<Pair<String, String>, CampingList>? = null
     private val reviewedSites by lazy { ReviewedCampingSites.load(context) }
     private var placePreview by mutableStateOf<PlacePreview?>(null)
     var campingCriteria by mutableStateOf(CampingCriteria(region = region, toilet = true))
@@ -254,7 +294,6 @@ private class AppState(private val context: Context) {
     var customItem by mutableStateOf("")
 
     var music by mutableStateOf(pref.getString("genre", "재즈") ?: "재즈")
-    var ambience by mutableStateOf(pref.getString("ambience", "별빛") ?: "별빛")
     var natureSound by mutableStateOf(pref.getString("natureSound", "숲소리") ?: "숲소리")
     // STEP040: 자연음 실제 오디오 상태와 음량. 음악 스트리밍 추천 시연과 구분합니다.
     var naturePlaybackStatus by mutableStateOf("정지")
@@ -262,29 +301,50 @@ private class AppState(private val context: Context) {
     var naturePlaybackProgress by mutableFloatStateOf(0f)
     var natureVolume by mutableFloatStateOf(pref.getFloat("natureVolume", 0.55f))
     fun saveNatureVolume() { pref.edit().putFloat("natureVolume", natureVolume).apply() }
-    var wakeHour by mutableIntStateOf(pref.getInt("wakeHour", 7))
-    var wakeMinute by mutableIntStateOf(pref.getInt("wakeMinute", 0))
+    val wakeMinuteOfDay: Int
+        get() = activeTrip.wakeMinuteOfDay ?: (
+            pref.getInt("wakeHour", 7).coerceIn(0, 23) * 60 + pref.getInt("wakeMinute", 0).coerceIn(0, 59)
+        )
+
+    fun saveWakeTime(tripId: String, minuteOfDay: Int): Boolean =
+        activeTrip.tripId == tripId && minuteOfDay in 0..1439 &&
+            updateTrip { it.copy(wakeMinuteOfDay = minuteOfDay) }
     var wakeSound by mutableStateOf(
         (pref.getString("wakeSound", "숲소리") ?: "숲소리")
             .takeIf { it in listOf("숲소리", "빗소리", "파도소리", "백색소음") } ?: "숲소리"
     )
     var morningFade by mutableIntStateOf(pref.getInt("morningFade", 15))
     var morningLevel by mutableFloatStateOf(pref.getFloat("morningLevel", 0.5f))
-    var morningEnabled by mutableStateOf(
-        pref.getBoolean("morningEnabled", false) &&
-                pref.getLong(ChabakMorningScheduler.KEY_TIME, 0L) > System.currentTimeMillis()
-    )
-    var morningStatus by mutableStateOf(ChabakMorningScheduler.status(context))
-    var dayTitle by mutableStateOf("")
-    var dayNote by mutableStateOf("")
-    var dayMood by mutableStateOf("편안해요")
-    var dayPhoto by mutableStateOf("")
-    var editingDiary by mutableIntStateOf(-1)
-    var diaries by mutableStateOf(readDiaries())
-    var weatherTemp by mutableStateOf<String?>(null)
-    var weatherLabel by mutableStateOf("연결 중")
-    var weatherChecked by mutableStateOf("")
-    private var packingObservation by mutableStateOf<PackingObservation?>(null)
+    var morningStatus by mutableStateOf("")
+    val legacyDiaries = readDiaries()
+    private var lastWeather by mutableStateOf<WeatherReading?>(null)
+
+    val weatherTarget: WeatherTarget
+        get() = when (page) {
+            "home", "places", "recommendations" -> WeatherTarget.forRegion(region)
+            "place_detail" -> WeatherTarget.forPlace(detailPlace)
+            else -> WeatherTarget.forPlace(activeTrip.place)
+        }
+
+    fun weatherReading(): WeatherReading? = lastWeather?.takeIf { it.target == weatherTarget }
+
+    private fun weatherFor(place: Place, now: LocalDateTime): AmbienceWeather? =
+        lastWeather?.takeIf { it.target == WeatherTarget.forPlace(place) }
+            ?.weather?.takeIf { it.matches(place.region, now) }
+
+    suspend fun refreshWeather(target: WeatherTarget) {
+        val result = withContext(Dispatchers.IO) { ChabakWeather.read(target, ::chabakNow) }
+        if (result != null && target == weatherTarget) lastWeather = result
+    }
+
+    fun ambienceRecommendation(now: LocalDateTime): AmbienceRecommendation =
+        AmbienceRules.recommend(now, activeTrip.place.region, activeTrip.place.natureTags(),
+            weatherFor(activeTrip.place, now))
+
+    private val packingObservation: PackingObservation?
+        get() = weatherFor(activeTrip.place, chabakNow())?.let {
+            PackingObservation(it.region, it.observedAt.toLocalDate(), it.temperature, it.label)
+        }
     var playlistVersion by mutableIntStateOf(pref.getInt("playlistVersion",0))
     var demoPlayStatus by mutableStateOf("정지")
     var demoTrackIndex by mutableIntStateOf(0)
@@ -297,7 +357,7 @@ private class AppState(private val context: Context) {
     fun savePhone(id:String,value:String) { pref.edit().putString("phone_$id",value.trim()).apply(); phoneDraft=value.trim() }
     fun shufflePlaylist() { playlistVersion++;demoTrackIndex=0;demoPlayStatus="정지";pref.edit().putInt("playlistVersion",playlistVersion).apply() }
     fun suggestedTracks(): List<String> {
-        val mood = when { weatherLabel.contains("비") -> "빗소리"; weatherLabel.contains("눈") -> "겨울밤"; else -> "숲속" }
+        val mood = ambienceRecommendation(chabakNow()).sound
         val sets = mapOf(
             "재즈" to listOf("고요한 호숫가 재즈","달빛 아래 스윙","밤공기와 피아노","새벽의 느린 재즈","은은한 재즈 기타"),
             "샹송" to listOf("호숫가 샹송","느린 저녁 산책","별빛의 프랑스어 멜로디","커피 향의 밤","차분한 아코디언"),
@@ -307,73 +367,32 @@ private class AppState(private val context: Context) {
         val base = sets[music] ?: listOf("${music} · 가벼운 시작","${music} · 산책","${music} · 편안한 휴식","${music} · 밤의 마무리","${music} · 아침")
         return (0..3).map { i -> "${i+1}. ${base[(i+playlistVersion)%base.size]}" } + "환경 추천 · ${mood} ASMR"
     }
-    fun refreshWeather() {
-        val currentRegion = region
-        val loc = when(currentRegion) {
-            "강원" -> Pair(37.8813,127.7298)
-            "충청" -> Pair(36.6424,127.4890)
-            "경상" -> Pair(35.8714,128.6014)
-            "전라" -> Pair(35.8242,127.1480)
-            "제주" -> Pair(33.4996,126.5312)
-            "경기" -> Pair(37.4138,127.5183)
-            else -> Pair(37.5665,126.9780)
-        }
-        Thread {
-            var temp: Int? = null
-            var observedOn: LocalDate? = null
-            var status = "날씨 연결 안 됨"
-            try {
-                val endpoint="https://api.open-meteo.com/v1/forecast?latitude=${loc.first}&longitude=${loc.second}&current=temperature_2m,weather_code&timezone=Asia%2FSeoul"
-                val conn=(URL(endpoint).openConnection() as HttpURLConnection).apply { connectTimeout=4500;readTimeout=4500 }
-                try {
-                    val json=JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).getJSONObject("current")
-                    temp = json.optDouble("temperature_2m").takeIf { it.isFinite() }?.toInt()
-                    observedOn = json.stringField("time").takeIf { it.isNotBlank() }?.let {
-                        try { LocalDateTime.parse(it).toLocalDate() }
-                        catch (_: java.time.format.DateTimeParseException) { null }
-                    }
-                    status=when(json.optInt("weather_code",-1)) {
-                        0->"맑음";1,2->"구름 조금";3->"흐림";45,48->"안개"
-                        51,53,55,56,57->"이슬비";61,63,65,66,67,80,81,82->"비"
-                        71,73,75,77,85,86->"눈";95,96,99->"뇌우";else->"관측 중"
-                    }
-                } finally { conn.disconnect() }
-            } catch (_:Exception) { }
-            Handler(Looper.getMainLooper()).post {
-                if (region != currentRegion) return@post
-                val temperature = temp
-                val day = observedOn
-                weatherTemp = temperature?.let { "${it}°" }
-                weatherLabel = status
-                weatherChecked = if (temperature != null) "Open-Meteo · $currentRegion 대표지점" else "네트워크/날씨 연결 확인"
-                packingObservation = if (temperature != null && day != null) {
-                    PackingObservation(currentRegion, day, temperature, status)
-                } else null
-            }
-        }.start()
-    }
-
     val selectedPlace: Place get() = activeTrip.place
 
     fun refreshCamps(query: String = "") {
-        campsLoading = true
         val currentRegion = region
+        val search = currentRegion to query.trim()
+        if (campsInFlight == search) return
+        campsLoading = true
+        campsInFlight = search
         val seq = ++campsSeq
         Thread {
             val result = try {
-                GoCampingCatalog.search(currentRegion, query)
+                GoCampingCatalog.search(currentRegion, search.second)
             } catch (_: Exception) {
                 null
             }
             Handler(Looper.getMainLooper()).post {
                 if (seq != campsSeq || region != currentRegion) return@post
-                places = result?.places ?: referencePlaces
-                livePlacesLoaded = result != null
-                campsMessage = if (result != null) {
-                    val day = goCampingCollectionDay(result.updatedAt)
-                    "고캠핑 공식 API · 조회 ${result.places.size}곳" + (day?.let { " · 수집 $it" } ?: "")
-                } else {
-                    "고캠핑 API 연결 실패 · 내장 참고 목록"
+                campsInFlight = null
+                if (result != null) lastCamps = search to result
+                val cached = lastCamps?.takeIf { it.first == search }?.second
+                places = cached?.places ?: referencePlaces
+                val day = cached?.let { goCampingCollectionDay(it.updatedAt) }?.let { " · 수집 $it" }.orEmpty()
+                campsMessage = when {
+                    result != null -> "고캠핑 공식 API · 조회 ${result.places.size}곳$day"
+                    cached != null -> "연결 실패 · 이전 고캠핑 조회 ${cached.places.size}곳$day"
+                    else -> "고캠핑 API 연결 실패 · 내장 참고 목록"
                 }
                 campsLoading = false
             }
@@ -515,10 +534,6 @@ private class AppState(private val context: Context) {
     fun selectRegion(value: String) {
         if (region != value) {
             region = value
-            weatherTemp = null
-            weatherLabel = "현재 날씨 확인 중"
-            weatherChecked = ""
-            packingObservation = null
             pref.edit().putString("region", value).apply()
         }
         refreshCamps()
@@ -548,6 +563,17 @@ private class AppState(private val context: Context) {
 
     fun saveTripEnergy(tripId: String, plan: TripEnergyPlan): Boolean =
         activeTrip.tripId == tripId && updateTrip { it.copy(energyPlan = plan) }
+
+    fun updateDiary(tripId: String, edit: (TripDiary) -> TripDiary): Boolean =
+        activeTrip.tripId == tripId && updateTrip { it.copy(diary = edit(it.diary)) }
+
+    fun recordStayStart(): Boolean = updateTrip { trip ->
+        trip.copy(diary = trip.diary.start(System.currentTimeMillis(), trip.place))
+    }
+
+    fun recordStayEnd(): Boolean = updateTrip { trip ->
+        trip.copy(diary = trip.diary.end(System.currentTimeMillis()))
+    }
 
     fun closeTripStore() = tripStore.close()
 
@@ -635,25 +661,8 @@ private class AppState(private val context: Context) {
                 if (item in trip.extraItems) trip else trip.copy(extraItems = trip.extraItems + item)
             }) customItem = ""
     }
-    fun saveRest() { pref.edit().putString("genre", music).putString("ambience", ambience).putString("natureSound", natureSound).apply() }
-    fun saveMorning() { pref.edit().putInt("wakeHour", wakeHour).putInt("wakeMinute", wakeMinute).putString("wakeSound", wakeSound).putInt("morningFade", morningFade).putFloat("morningLevel", morningLevel).putBoolean("morningEnabled", morningEnabled).putBoolean("sunriseForegroundOptIn", sunriseForegroundOptIn).apply() }
-    fun openDiary(index: Int) {
-        editingDiary = index
-        val d = diaries.getOrNull(index)
-        dayTitle = d?.title ?: "${LocalDate.now().monthValue}월 ${LocalDate.now().dayOfMonth}일의 차박"
-        dayNote = d?.note ?: ""
-        dayMood = d?.mood ?: "편안해요"
-        dayPhoto = d?.photoUri ?: ""
-    }
-    fun saveDiary() {
-        val v = DiaryEntry(dayTitle.ifBlank { "오늘의 차박" }, LocalDate.now().toString(), selectedPlace.name, dayMood, dayNote, dayPhoto)
-        val existing = editingDiary in diaries.indices
-        diaries = if (existing) diaries.toMutableList().also { it[editingDiary] = v } else listOf(v) + diaries
-        if (!existing) editingDiary = 0
-        val array = JSONArray()
-        for (d in diaries) array.put(JSONObject().put("title",d.title).put("date",d.date).put("place",d.place).put("mood",d.mood).put("note",d.note).put("photo",d.photoUri))
-        pref.edit().putString("diaries", array.toString()).apply()
-    }
+    fun saveRest() { pref.edit().putString("genre", music).putString("natureSound", natureSound).apply() }
+    fun saveMorning() { pref.edit().putString("wakeSound", wakeSound).putInt("morningFade", morningFade).putFloat("morningLevel", morningLevel).putBoolean("sunriseForegroundOptIn", sunriseForegroundOptIn).apply() }
     private fun readDiaries(): List<DiaryEntry> = try {
         val arr = JSONArray(pref.getString("diaries", "[]"))
         (0 until arr.length()).map { i -> arr.getJSONObject(i).let { DiaryEntry(it.optString("title"), it.optString("date"), it.optString("place"), it.optString("mood"), it.optString("note"), it.optString("photo")) } }
@@ -694,7 +703,9 @@ private class AppState(private val context: Context) {
 private val natureTrackNames = listOf("숲소리", "빗소리", "파도소리", "백색소음")
 private val LocalNatureAudio = compositionLocalOf<NatureAudioEngine?> { null }
 
-private class NatureAudioEngine(private val context: Context, private val state: AppState) {
+private class NatureAudioEngine(
+    private val context: Context, private val state: AppState, private val canPlay: () -> Boolean
+) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val attributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -741,6 +752,7 @@ private class NatureAudioEngine(private val context: Context, private val state:
         player = null
     }
     fun start() {
+        if (!canPlay()) return
         if (state.natureSound !in natureTrackNames) {
             state.natureSound = "숲소리"
             state.saveRest()
@@ -779,6 +791,7 @@ private class NatureAudioEngine(private val context: Context, private val state:
         state.naturePlaybackProgress = 0f
     }
     fun select(sound: String) {
+        if (!canPlay() || sound !in natureTrackNames) return
         val wasPlaying = state.naturePlaybackStatus == "재생 중"
         stop()
         state.natureSound = sound
@@ -795,6 +808,7 @@ private class NatureAudioEngine(private val context: Context, private val state:
         select(natureTrackNames[(current + natureTrackNames.size - 1) % natureTrackNames.size])
     }
     fun setVolume(value: Float) {
+        if (!canPlay()) return
         state.natureVolume = value.coerceIn(0f, 1f)
         state.saveNatureVolume()
         try { player?.setVolume(state.natureVolume, state.natureVolume) } catch (_: Exception) { }
@@ -818,59 +832,118 @@ private fun Chabak3App(alarmIntentSerial: Int, gleoIntents: Channel<Intent>) {
     val recommendationScroll = rememberScrollState()
     LaunchedEffect(s.recommendationSeq) { recommendationScroll.scrollTo(0) }
     DisposableEffect(s) { onDispose { s.closeTripStore() } }
-    LaunchedEffect(gleoIntents) {
-        for (intent in gleoIntents) {
-            GleoCampingAction.handle(context.applicationContext, intent, s::searchFromGleo)
-        }
-    }
     var wallClock by remember { mutableStateOf(chabakNow()) }
     LaunchedEffect(Unit) { while (true) { wallClock = chabakNow(); delay(10_000L) } }
-    val nowScene = timeScene(wallClock.hour)
+    val nowScene = AmbienceRules.sceneAt(wallClock.hour)
     val appPrefs = remember(context) { context.getSharedPreferences("chabak_3", Context.MODE_PRIVATE) }
+    val activity = context as? ComponentActivity
+    val restGate = remember(context) { TravelUxGate(context) }
+    var startedStayTripId by remember(context, s) {
+        val saved = ChabakMorningScheduler.stayTrip(context)
+        val active = s.savedTrips.firstOrNull { it.diary.inProgress }?.tripId
+        if (active != null && active != saved) ChabakMorningScheduler.startStay(context, active)
+        if (active == null && saved != null &&
+            s.savedTrips.any { it.tripId == saved && it.diary.sessions.isNotEmpty() }) {
+            ChabakMorningScheduler.endStay(context, saved)
+        }
+        mutableStateOf(ChabakMorningScheduler.stayTrip(context))
+    }
+    var restInteraction by remember(restGate) { mutableStateOf(TravelInteraction.UNKNOWN) }
+    DisposableEffect(restGate, s) {
+        restGate.start { interaction ->
+            restInteraction = interaction
+            if (interaction != TravelInteraction.ALLOWED) {
+                s.wakeSceneLive = false
+                s.wakeScenePreview = false
+            }
+        }
+        onDispose { restGate.close() }
+    }
 
-    // 알림 탭으로 진입하는 경우에만 화면을 열고, 밤 시험 알람은 모닝 설정으로 이동합니다.
-    LaunchedEffect(alarmIntentSerial) {
-        val activity = context as? ComponentActivity
+    // 알림에서 돌아올 때도 차량 UI 제한을 확인한 뒤 풍경을 표시합니다.
+    LaunchedEffect(alarmIntentSerial, restInteraction) {
         if (activity?.intent?.getBooleanExtra("open_morning", false) == true) {
-            val triggered = appPrefs.getLong(ChabakMorningScheduler.KEY_LAST_TRIGGER, 0L)
-            val test = appPrefs.getBoolean(ChabakMorningScheduler.KEY_LAST_WAS_TEST, false)
+            if (restInteraction == TravelInteraction.UNKNOWN) return@LaunchedEffect
+            activity.intent?.removeExtra("open_morning")
+            if (restGate.current() != TravelInteraction.ALLOWED ||
+                startedStayTripId != s.activeTrip.tripId) return@LaunchedEffect
+            val triggered = ChabakMorningScheduler.lastTriggerFor(context, s.activeTrip.tripId)
             val fresh = triggered > 0L && System.currentTimeMillis() - triggered in 0L..(5 * 60_000L)
             if (fresh) {
                 s.wakeSceneLive = true
                 s.wakeScenePreview = false
-                s.wakeQuickMode = !isMorningTime()
+                s.wakeQuickMode = false
                 s.wakeTransitionSerial++
             } else s.navigate("morning")
-            activity.intent?.removeExtra("open_morning")
         }
     }
     // 사용자가 '정차 중 자동 표시'를 선택했고, 앱에서 차박 중/스마트 모닝을 보고 있을 때만 전환.
-    // 주행 상태를 실제 차량에서 검증하지 못하므로 기본값은 꺼짐입니다.
     LaunchedEffect(Unit) {
         var seen = appPrefs.getLong(ChabakMorningScheduler.KEY_LAST_TRIGGER, 0L)
         while (true) {
             val latest = appPrefs.getLong(ChabakMorningScheduler.KEY_LAST_TRIGGER, 0L)
             if (latest > seen) {
                 seen = latest
-                val recent = System.currentTimeMillis() - latest in 0L..90_000L
-                val isTest = appPrefs.getBoolean(ChabakMorningScheduler.KEY_LAST_WAS_TEST, false)
-                if (recent && s.sunriseForegroundOptIn &&
+                val recent = System.currentTimeMillis() - latest in 0L..90_000L &&
+                    ChabakMorningScheduler.lastTriggerFor(context, s.activeTrip.tripId) == latest
+                val foreground = activity?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) == true
+                if (recent && (s.page == "stay" || s.page == "morning")) {
+                    s.morningStatus = if (appPrefs.getBoolean(ChabakMorningScheduler.KEY_LAST_WAS_TEST, false))
+                        ChabakMorningScheduler.status(context, s.activeTrip.tripId)
+                    else "기상 알람이 울렸어요."
+                }
+                if (recent && foreground && s.sunriseForegroundOptIn &&
+                    startedStayTripId == s.activeTrip.tripId && restGate.current() == TravelInteraction.ALLOWED &&
                     (s.page == "home" || s.page == "stay" || s.page == "morning")) {
                     // 일반/시험 알람 모두 현재 페이지를 유지한 채 배경만 부드럽게 전환.
                     // 인사말은 실제 현재 시간으로 계산하므로 밤에 아침 인사가 뜨지 않음.
                     s.wakeSceneLive = true
                     s.wakeScenePreview = false
-                    s.wakeQuickMode = !isMorningTime()
+                    s.wakeQuickMode = false
                     s.wakeTransitionSerial++
-                } else if (recent && (s.page == "stay" || s.page == "morning")) {
-                    s.morningStatus = "알람이 울렸어요. 알림을 눌러 확인할 수 있어요."
                 }
             }
             delay(1200L)
         }
     }
-    val natureAudio = remember(context, s) { NatureAudioEngine(context.applicationContext, s) }
-    val activity = context as? ComponentActivity
+    val natureAudio = remember(context, s, restGate) {
+        NatureAudioEngine(context.applicationContext, s) { restGate.current() == TravelInteraction.ALLOWED }
+    }
+    val restAllowed = restInteraction == TravelInteraction.ALLOWED
+    val latestEnergy = rememberUpdatedState(vehicleEnergy)
+    val actionScope = rememberCoroutineScope()
+    fun startSelectedStay(): String {
+        if (restGate.current() != TravelInteraction.ALLOWED) return "VEHICLE_RESTRICTED"
+        if (s.activeTrip.diary.archived) return "TRIP_ARCHIVED"
+        if (startedStayTripId == s.activeTrip.tripId) return "ALREADY_STARTED"
+        if (startedStayTripId != null) return "ANOTHER_TRIP_ACTIVE"
+        if (!s.recordStayStart()) return "STORAGE_FAILURE"
+        ChabakMorningScheduler.startStay(context, s.activeTrip.tripId)
+        startedStayTripId = s.activeTrip.tripId
+        s.navigate("stay")
+        return "STARTED"
+    }
+    LaunchedEffect(gleoIntents) {
+        for (intent in gleoIntents) {
+            if (intent.action == GleoCampingAction.ACTION) {
+                GleoCampingAction.handle(context.applicationContext, intent, s::searchFromGleo)
+            } else {
+                GleoTripAction.handle(context.applicationContext, intent, s.activeTrip.visitDate, chabakNow().toLocalDate(),
+                    search = s::searchNearby, start = ::startSelectedStay,
+                    energy = {
+                        s.navigate("energy")
+                        kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                            snapshotFlow { latestEnergy.value }.first {
+                                val missing = it.soc as? EnergyRead.Missing
+                                missing == null || missing.issue !in setOf(EnergyIssue.INACTIVE, EnergyIssue.LOADING)
+                            }
+                        } ?: VehicleEnergy(soc = EnergyRead.Missing(EnergyIssue.CONNECTION))
+                    })
+            }
+        }
+    }
+
+    LaunchedEffect(restAllowed) { if (!restAllowed) natureAudio.stop() }
     DisposableEffect(natureAudio, activity) {
         val observer = LifecycleEventObserver { _, event ->
             // 주행/다른 앱 전환 중 무단 재생 방지: 화면이 백그라운드면 일시정지
@@ -888,10 +961,17 @@ private fun Chabak3App(alarmIntentSerial: Int, gleoIntents: Channel<Intent>) {
             delay(350L)
         }
     }
-    val bgResources = listOf(R.drawable.morning, R.drawable.day, R.drawable.evening, R.drawable.night)
-    val currentTheme = if (s.page == "wake_scene") R.drawable.morning
-    else bgResources[(if (s.themeIndex == -1) nowScene.index else s.themeIndex) % bgResources.size]
-    LaunchedEffect(s.region) { while (true) { s.refreshWeather(); delay(15*60*1000L) } }
+    val bgResources = listOf(R.drawable.chabak2_bg_morning, R.drawable.chabak2_bg_day, R.drawable.chabak2_bg_sunset, R.drawable.chabak2_bg_night)
+    val ambience = if (startedStayTripId == s.activeTrip.tripId) s.ambienceRecommendation(wallClock) else null
+    val selectedScene = AmbienceRules.selectedScene(s.themeIndex, ambience?.scene ?: nowScene)
+    val currentTheme = if (s.page == "wake_scene") R.drawable.chabak2_bg_morning else bgResources[selectedScene.index]
+    val weatherTarget = s.weatherTarget
+    LaunchedEffect(weatherTarget) {
+        while (true) {
+            s.refreshWeather(weatherTarget)
+            delay(if (s.weatherReading() == null) 60_000L else 15 * 60_000L)
+        }
+    }
     LaunchedEffect(Unit) { s.refreshCamps() }
     val wakeTransitionActive = s.wakeScenePreview || s.wakeSceneLive
     val wakeBlend = remember { Animatable(0f) }
@@ -910,7 +990,13 @@ private fun Chabak3App(alarmIntentSerial: Int, gleoIntents: Channel<Intent>) {
         } else s.back()
     }
     Box(Modifier.fillMaxSize().background(Midnight)) {
-        ScenicResource(currentTheme, Modifier.fillMaxSize(), ContentScale.Crop)
+        if (restAllowed && !wakeTransitionActive) {
+            Crossfade(currentTheme, Modifier.fillMaxSize(), animationSpec = tween(700), label = "natureTheme") { theme ->
+                ScenicResource(theme, Modifier.fillMaxSize(), ContentScale.Crop)
+            }
+        } else {
+            ScenicResource(currentTheme, Modifier.fillMaxSize(), ContentScale.Crop)
+        }
         if (wakeTransitionActive) {
             if (s.wakeSceneLive && s.wakeQuickMode) {
                 // 현재 시간의 풍경으로 1.35초 교차 전환. 번쩍임과 암전 없이 자연스럽게.
@@ -921,14 +1007,22 @@ private fun Chabak3App(alarmIntentSerial: Int, gleoIntents: Channel<Intent>) {
                     Color(0xFF10232B).copy(alpha = 0.13f * wakeBlend.value)))
             } else {
                 // 아침: 기존 화면에 아침 숲이 12초 동안 자연스럽게 겹쳐짐.
-                ScenicResource(R.drawable.morning, Modifier.fillMaxSize().graphicsLayer { alpha = wakeBlend.value }, ContentScale.Crop)
+                ScenicResource(R.drawable.chabak2_bg_morning, Modifier.fillMaxSize().graphicsLayer { alpha = wakeBlend.value }, ContentScale.Crop)
                 Box(Modifier.fillMaxSize().background(Color(0xFF071525).copy(alpha = 0.62f * (1f - wakeBlend.value))))
                 Box(Modifier.fillMaxSize().background(Color(0xFFFFD58F).copy(alpha = 0.09f * wakeBlend.value)))
             }
         }
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x31071725), Color(0x4A082631), Color(0x9A081C28)))))
-        Column(Modifier.fillMaxSize().padding(horizontal = 19.dp, vertical = 13.dp)) {
-            AppTopBar(s, onBack = { s.back() })
+        Row(Modifier.fillMaxSize().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+            ChabakNavigationRail(s.page, restAllowed) { destination ->
+                if (destination == "home") s.home() else if (destination != s.page) s.navigate(destination)
+            }
+            Column(Modifier.weight(1f).fillMaxHeight()) {
+            AppTopBar(s, if (wakeTransitionActive) TimeScene.MORNING else selectedScene, restAllowed,
+                onBack = { s.back() }) {
+                if (restGate.current() == TravelInteraction.ALLOWED)
+                    s.selectTheme(if (s.themeIndex >= 3) -1 else s.themeIndex + 1)
+            }
             Spacer(Modifier.height(6.dp))
             ClockWeatherBar(s, large=s.page=="stay")
             Spacer(Modifier.height(9.dp))
@@ -944,17 +1038,58 @@ private fun Chabak3App(alarmIntentSerial: Int, gleoIntents: Channel<Intent>) {
                 Box(Modifier.fillMaxWidth().fillMaxHeight(if (isMain) .65f else .95f)) {
                     CompositionLocalProvider(LocalNatureAudio provides natureAudio) {
                         when(s.page) {
+                            "gleo" -> if (restAllowed) GleoInformation() else GlassPanel {
+                                SectionTitle("Gleo", "차량 화면 조작 허용 시 안내를 볼 수 있어요.")
+                            }
                             "home" -> HomeScreen(s, onTrips = { tripPickerOpen = true })
                             "places" -> PlacesScreen(s)
                             "recommendations" -> RecommendationScreen(s, recommendationScroll)
                             "place_detail" -> PlaceDetailScreen(s)
                             "packing" -> PackingScreen(s)
                             "trip_travel" -> TripTravelScreen(s.activeTrip, s.travelPlace, s::saveTripTravel)
-                            "stay" -> StayScreen(s, vehicleEnergy)
+                            "stay" -> StayScreen(
+                                s, vehicleEnergy, selectedScene, ambience, restAllowed,
+                                started = startedStayTripId == s.activeTrip.tripId,
+                                canStart = restInteraction == TravelInteraction.ALLOWED && startedStayTripId == null &&
+                                    !s.activeTrip.diary.archived,
+                                anotherStay = startedStayTripId != null && startedStayTripId != s.activeTrip.tripId,
+                                morningSummary = ChabakMorningScheduler.status(context, s.activeTrip.tripId),
+                                onStart = {
+                                    startSelectedStay()
+                                },
+                                onEnd = {
+                                    if (startedStayTripId == s.activeTrip.tripId && s.recordStayEnd()) {
+                                        ChabakMorningScheduler.endStay(context, s.activeTrip.tripId)
+                                        startedStayTripId = null
+                                        s.wakeSceneLive = false
+                                        if (restGate.current() == TravelInteraction.ALLOWED) s.navigate("diary")
+                                        else s.home()
+                                    }
+                                }
+                            )
                             "energy" -> SmartEnergyScreen(s.activeTrip, vehicleEnergy, s::saveTripEnergy)
-                            "environment" -> EnvironmentScreen(s)
-                            "playlist" -> PlaylistScreen(s)
-                            "morning" -> MorningScreen(s)
+                            "nearby" -> if (!restAllowed) GlassPanel(Modifier.fillMaxWidth()) {
+                                SectionTitle("주변 즐길거리", "차량 화면 조작이 허용될 때 확인할 수 있어요.")
+                            } else NearbyPlacesScreen(s.activeTrip, s.nearbyQuery, s.nearbyResult, s.nearbyLoading,
+                                search = { query -> actionScope.launch { s.searchNearby(query) } },
+                                onTravel = { s.navigate("trip_travel") })
+                            "environment", "playlist" -> when {
+                                !restAllowed -> GlassPanel(Modifier.fillMaxWidth()) {
+                                    SectionTitle("차박 휴식", "차량 화면 조작이 허용될 때 설정할 수 있어요.")
+                                }
+                                s.page == "environment" -> EnvironmentScreen(s, ambience, selectedScene) {
+                                    if (restGate.current() == TravelInteraction.ALLOWED) s.selectTheme(it)
+                                }
+                                else -> PlaylistScreen(s)
+                            }
+                            "morning" -> {
+                                val tripId = s.activeTrip.tripId
+                                MorningScreen(
+                                    s, startedStayTripId == tripId,
+                                    restInteraction == TravelInteraction.ALLOWED
+                                ) { s.activeTrip.tripId == tripId && startedStayTripId == tripId &&
+                                    restGate.current() == TravelInteraction.ALLOWED }
+                            }
                             "wake_scene" -> MorningWakeScene(s, nowScene,
                                 onStop = {
                                     if (s.wakeSceneLive) {
@@ -970,14 +1105,19 @@ private fun Chabak3App(alarmIntentSerial: Int, gleoIntents: Channel<Intent>) {
                                     }
                                     s.wakeSceneLive = false; s.back()
                                 })
-                            "diary" -> DiaryScreen(s)
+                            "diary" -> key(s.activeTrip.tripId) {
+                                TripDiaryScreen(s.activeTrip, s.legacyDiaries, restAllowed, s::updateDiary) {
+                                    restGate.current() == TravelInteraction.ALLOWED
+                                }
+                            }
                             else -> HomeScreen(s, onTrips = { tripPickerOpen = true })
                         }
                     }
                 }
             }
             Spacer(Modifier.height(6.dp))
-            Text("고캠핑 자료 참고 · 로컬 알람 음악/자연음 재생 · 스트리밍·차량 제어는 시연", color=Muted.copy(alpha=.85f), fontSize=17.sp, modifier=Modifier.align(Alignment.End))
+            Text("고캠핑 · 개발 서버 연결 · 자연음과 기상 알림", color=Muted.copy(alpha=.85f), fontSize=17.sp, modifier=Modifier.align(Alignment.End))
+        }
         }
         if (tripPickerOpen) {
             TripPicker(
@@ -1033,7 +1173,7 @@ private fun Chabak3App(alarmIntentSerial: Int, gleoIntents: Channel<Intent>) {
             ) {
                 Text(if (s.wakeScenePreview) "일출 미리보기"
                 else if (s.wakeQuickMode) "♫ CHABAK"
-                else "☀ ${nowScene.greeting}",
+                else "☀ 좋은 아침이에요. 오늘도 즐거운 차박 되세요.",
                     color = Frost, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                 if (s.wakeSceneLive) {
                     Text("5분 뒤 다시", color = Gold, fontSize = 18.sp, modifier = Modifier.clickable {
@@ -1058,32 +1198,31 @@ private fun Chabak3App(alarmIntentSerial: Int, gleoIntents: Channel<Intent>) {
 
 @Composable
 private fun ScenicResource(res: Int, modifier: Modifier = Modifier, scale: ContentScale = ContentScale.Crop) {
-    val context = LocalContext.current
-    val bmp: ImageBitmap? = remember(res) {
-        try { BitmapFactory.decodeResource(context.resources,res,BitmapFactory.Options().apply { inSampleSize = 2 })?.asImageBitmap() }
-        catch (_: Exception) { null }
-    }
-    if (bmp!=null) Image(bitmap=bmp,contentDescription=null,contentScale=scale,modifier=modifier)
-    else Box(modifier.background(Brush.linearGradient(listOf(Midnight,Pine))))
+    ChabakImage(res, modifier, scale)
 }
 
 @Composable
-private fun AppTopBar(s: AppState, onBack: () -> Unit) {
-    Row(Modifier.fillMaxWidth().heightIn(min=57.dp), verticalAlignment=Alignment.CenterVertically) {
-        if (s.page != "home") Text("‹",fontSize=43.sp,color=Frost,modifier=Modifier.clickable(onClick=onBack).padding(end=17.dp))
+private fun AppTopBar(s: AppState, scene: TimeScene, allowThemeChange: Boolean, onBack: () -> Unit, onTheme: () -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min=57.dp).clip(RoundedCornerShape(18.dp)).background(Color(0xB00D2B21)).padding(horizontal=10.dp,vertical=4.dp), verticalAlignment=Alignment.CenterVertically) {
+        if (s.page != "home") Box(
+            Modifier.size(64.dp).clip(RoundedCornerShape(18.dp)).background(Color(0x3210201C))
+                .semantics { contentDescription = "뒤로" }
+                .clickable(onClick=onBack), contentAlignment = Alignment.Center
+        ) { Text("‹", fontSize=44.sp, color=Frost) }
+        Spacer(Modifier.width(10.dp))
         Text(when(s.page) {
-            "home"->"CHABAK  ·  차박 준비";"places"->"차박 장소 찾기";"recommendations"->"맞춤 장소 추천";"place_detail"->s.detailPlace.name
+            "home"->"CHABAK 2.0  ·  차박 준비";"places"->"차박 장소 찾기";"recommendations"->"맞춤 장소 추천";"place_detail"->s.detailPlace.name
             "packing"->"나만의 준비물";"trip_travel"->"이동 정보";"stay"->"CHABAK  ·  차박 중";"energy"->"스마트 에너지"
             "playlist"->"나만의 플레이리스트";"environment"->"차박 환경 조성";"morning"->"스마트 모닝"
-            "diary"->"차박 다이어리";"wake_scene"->"일출 모닝";else->"CHABAK"
-        }, color=Frost,fontSize=35.sp,fontWeight=FontWeight.Bold,maxLines=1,modifier=Modifier.weight(1f))
+            "gleo"->"Gleo 음성 안내";"diary"->"차박 다이어리";"nearby"->"주변 즐길거리";"wake_scene"->"일출 모닝";else->"CHABAK"
+        }, color=Frost,fontSize=36.sp,fontWeight=FontWeight.Bold,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.weight(1f))
 
-        val phase = timeScene(chabakNow().hour)
-        val idx = if (s.themeIndex == -1) phase.index else s.themeIndex
-        val mode = if (s.themeIndex == -1) "자동" else "수동"
-        OutlineChip("$mode · ${listOf("아침","낮","노을","밤")[idx]} ↻",false) {
-            s.themeIndex = if (s.themeIndex >= 3) -1 else s.themeIndex + 1
-        }
+        if (allowThemeChange) ActionButton("Gleo ≋", Modifier.width(116.dp), filled = false) { s.navigate("gleo") }
+        Spacer(Modifier.width(10.dp))
+        val mode = if (s.wakeSceneLive || s.wakeScenePreview) "모닝" else if (s.themeIndex == -1) "자동" else "수동"
+        val title = "$mode · ${scene.nameLabel}"
+        if (allowThemeChange && mode != "모닝") OutlineChip("$title ↻", false, onClick = onTheme)
+        else Text(title, color = Muted, fontSize = 20.sp)
     }
 }
 
@@ -1092,48 +1231,62 @@ private fun ClockWeatherBar(s:AppState,large:Boolean=false) {
     var clock by remember { mutableStateOf(chabakNow()) }
     LaunchedEffect(Unit) { while(true) { clock=chabakNow();delay(1000L) } }
     val fmt=DateTimeFormatter.ofPattern("HH:mm",Locale.KOREAN)
+    val target = s.weatherTarget
+    val reading = s.weatherReading()
+    val weather = reading?.weather?.takeIf { it.matches(target.region, clock) }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp))
-        .background(Color(0x25FFFFFF))
+        .background(Color(0xB0103024))
         .border(1.dp,GlassBorder,RoundedCornerShape(15.dp))
         .padding(horizontal=20.dp,vertical=if(large) 12.dp else 7.dp),verticalAlignment=Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("${s.region} 기준  ·  ${clock.monthValue}월 ${clock.dayOfMonth}일",color=Muted,fontSize=24.sp)
-            Text(if(s.weatherTemp!=null) "${s.weatherTemp}  ${s.weatherLabel}" else s.weatherLabel,
+            Text("${target.label}  ·  ${clock.monthValue}월 ${clock.dayOfMonth}일",color=Muted,fontSize=24.sp)
+            Text(weather?.let { "${it.temperature}° · ${it.label}" } ?: "현재 날씨 확인 필요",
                 color=Frost,fontSize=if(large) 29.sp else 25.sp,fontWeight=FontWeight.Bold)
         }
         Column(horizontalAlignment=Alignment.End) {
             Text(clock.format(fmt),color=Gold,fontSize=if(large) 42.sp else 32.sp,fontWeight=FontWeight.Bold)
-            Text(if(s.weatherTemp!=null) "선택지역 대표지점 날씨" else "날씨 연동 확인 중",
-                color=Muted,fontSize=24.sp)
+            val source = when {
+                weather != null ->
+                    "Open-Meteo · 모델 ${weather.observedAt.format(fmt)} · 조회 ${reading.fetchedAt.format(fmt)}"
+                reading != null -> "이전 날씨 만료 · 다시 확인 중"
+                else -> "날씨 데이터 미확인"
+            }
+            Text(source, color=Muted,fontSize=21.sp)
         }
     }
 }
 
 @Composable
 internal fun GlassPanel(modifier: Modifier=Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Column(modifier.clip(RoundedCornerShape(23.dp)).background(Glass).border(1.dp,GlassBorder,RoundedCornerShape(23.dp)).padding(17.dp), content=content)
+    Column(
+        modifier.clip(RoundedCornerShape(ChabakDesign.radius))
+            .background(ChabakDesign.card)
+            .background(Brush.verticalGradient(listOf(Color(0x0FFFFFFF), Color.Transparent)))
+            .border(1.dp,GlassBorder,RoundedCornerShape(ChabakDesign.radius)).padding(ChabakDesign.space),
+        content=content
+    )
 }
 
 @Composable
 internal fun ActionButton(label: String, modifier: Modifier=Modifier, filled: Boolean = true, onClick:()->Unit) {
-    val radius=RoundedCornerShape(16.dp)
-    Box(modifier.heightIn(min=60.dp).clip(radius).background(Brush.horizontalGradient(listOf(Color(0x30FFFFFF),Color(0x1EFFFFFF)))).border(1.dp,if(filled) Gold else GlassBorder,radius).clickable(onClick=onClick).padding(horizontal=13.dp),contentAlignment=Alignment.Center) {
-        Text(label,color=if(filled) Gold else Frost,fontSize=24.sp,fontWeight=FontWeight.Bold,maxLines=1,overflow=TextOverflow.Ellipsis)
+    val radius=RoundedCornerShape(ChabakDesign.buttonRadius)
+    Box(modifier.heightIn(min=64.dp).clip(radius).background(if(filled) ChabakDesign.primary else Color(0x86142E24)).border(1.dp,if(filled) Gold else GlassBorder,radius).clickable(onClick=onClick).padding(horizontal=13.dp),contentAlignment=Alignment.Center) {
+        Text(label,color=if(filled) Color.White else Frost,fontSize=26.sp,fontWeight=FontWeight.Bold,maxLines=2,overflow=TextOverflow.Ellipsis,textAlign=TextAlign.Center)
     }
 }
 
 @Composable
 private fun OutlineChip(label: String, selected: Boolean, modifier: Modifier=Modifier, onClick:()->Unit) {
     val r=RoundedCornerShape(13.dp)
-    Box(modifier.heightIn(min=56.dp).clip(r).background(if(selected) Color(0x557BBA82) else Color(0x20FFFFFF)).border(1.dp,if(selected) Mint else GlassBorder,r).clickable(onClick=onClick).padding(horizontal=15.dp,vertical=9.dp),contentAlignment=Alignment.Center) {
+    Box(modifier.heightIn(min=64.dp).clip(r).background(if(selected) Color(0x557BBA82) else Color(0x20FFFFFF)).border(1.dp,if(selected) Mint else GlassBorder,r).clickable(onClick=onClick).padding(horizontal=15.dp,vertical=9.dp),contentAlignment=Alignment.Center) {
         Text(label,color=Frost,fontSize=24.sp,fontWeight=if(selected) FontWeight.Bold else FontWeight.Medium,maxLines=1)
     }
 }
 
 @Composable
 internal fun SectionTitle(title:String, detail:String="") {
-    Text(title,color=Frost,fontSize=29.sp,fontWeight=FontWeight.Bold)
-    if(detail.isNotBlank()) { Spacer(Modifier.height(4.dp));Text(detail,color=Muted,fontSize=24.sp) }
+    Text(title,color=Frost,fontSize=ChabakDesign.sectionText,fontWeight=FontWeight.Bold)
+    if(detail.isNotBlank()) { Spacer(Modifier.height(4.dp));Text(detail,color=Muted,fontSize=ChabakDesign.bodyText) }
 }
 
 @Composable
@@ -1144,17 +1297,25 @@ private fun TripPicker(
     onCreate: () -> Unit,
     onClose: () -> Unit
 ) {
+    var showArchived by rememberSaveable { mutableStateOf(false) }
+    val visible = trips.filter { showArchived || !it.diary.archived }
     Dialog(onDismissRequest = onClose, properties = DialogProperties(
         dismissOnClickOutside = false, usePlatformDefaultWidth = false
     )) {
         GlassPanel(Modifier.widthIn(max = 720.dp).fillMaxWidth(.9f)) {
-            SectionTitle("내 여행", "변경 사항은 여행별로 자동 저장돼요.")
+            SectionTitle("내 여행", "선택한 여행의 준비물, 이동 정보, 차박 기록을 확인하세요.")
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlineChip("진행·예정", !showArchived) { showArchived = false }
+                OutlineChip("보관 포함", showArchived) { showArchived = true }
+            }
             Spacer(Modifier.height(12.dp))
             Column(
-                Modifier.fillMaxWidth().heightIn(max = 325.dp).verticalScroll(rememberScrollState()),
+                Modifier.fillMaxWidth().heightIn(max = 370.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                trips.forEachIndexed { index, trip ->
+                visible.forEach { trip ->
+                    val index = trips.indexOfFirst { it.tripId == trip.tripId }
                     val active = trip.tripId == activeTripId
                     Column(
                         Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Glass)
@@ -1162,11 +1323,17 @@ private fun TripPicker(
                             .clickable { onOpen(trip.tripId) }.padding(12.dp)
                     ) {
                         Text("여행 ${trips.size - index} · ${trip.place.name}",
-                            color = Frost, fontSize = 23.sp, fontWeight = FontWeight.SemiBold,
+                            color = Frost, fontSize = 27.sp, fontWeight = FontWeight.SemiBold,
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        Text("${trip.visitDate} · ${trip.people}명 · ${trip.nights}박" +
+                        val phase = when {
+                            trip.diary.inProgress -> "차박 중"
+                            trip.diary.archived -> "보관"
+                            trip.diary.sessions.isNotEmpty() -> "차박 종료"
+                            else -> "계획 중"
+                        }
+                        Text("${trip.visitDate} · ${trip.people}명 · ${trip.nights}박 · $phase" +
                             if (active) " · 선택 중" else "",
-                            color = if (active) Gold else Muted, fontSize = 19.sp)
+                            color = if (active) Gold else Muted, fontSize = 22.sp)
                     }
                 }
             }
@@ -1192,7 +1359,7 @@ private fun HomeScreen(s: AppState, onTrips: () -> Unit) {
             Triple("스마트 에너지", "배터리와 숙박 에너지 계획", { s.navigate("energy") })
         )
         Column(
-            Modifier.fillMaxWidth(if (columns == 2) .85f else 1f).verticalScroll(rememberScrollState()),
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             actions.chunked(columns).forEach { row ->
@@ -1209,15 +1376,16 @@ private fun HomeScreen(s: AppState, onTrips: () -> Unit) {
 @Composable
 private fun HomeQuickFeature(title: String, subtitle: String, modifier: Modifier, onClick: () -> Unit) {
     Row(
-        modifier.heightIn(min = 76.dp).clip(RoundedCornerShape(21.dp)).background(Glass)
+        modifier.heightIn(min = 132.dp).clip(RoundedCornerShape(21.dp)).background(Color(0x66102420)).background(Glass)
             .border(1.dp, GlassBorder, RoundedCornerShape(21.dp))
             .clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        Text(when(title) { "차박지 찾기" -> "⌖"; "내 여행" -> "▤"; "차박 중" -> "☾"; else -> "ϟ" }, color = Gold, fontSize = 42.sp)
         Column(Modifier.weight(1f)) {
-            Text(title, color = Frost, fontSize = 27.sp, fontWeight = FontWeight.Bold)
-            Text(subtitle, color = Muted, fontSize = 19.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, color = Frost, fontSize = 32.sp, fontWeight = FontWeight.Bold)
+            Text(subtitle, color = Muted, fontSize = 23.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Text("›", color = Frost, fontSize = 34.sp)
     }
@@ -1294,6 +1462,7 @@ private fun RecommendationFilters(s: AppState) {
     }
     RecommendationChoiceRow("필수 시설") {
         OutlineChip("화장실 필수", criteria.toilet) { s.changeCampingCriteria(criteria.copy(toilet = !criteria.toilet)) }
+        OutlineChip("샤워실 필수", criteria.shower) { s.changeCampingCriteria(criteria.copy(shower = !criteria.shower)) }
         OutlineChip("캠핑용 전기 필수", criteria.campingPower) { s.changeCampingCriteria(criteria.copy(campingPower = !criteria.campingPower)) }
         OutlineChip("매점·편의점 필수", criteria.store) { s.changeCampingCriteria(criteria.copy(store = !criteria.store)) }
         if (criteria.evCharging || criteria.kind != CampingPlaceKind.CAMPGROUND) {
@@ -1377,7 +1546,7 @@ private fun PlacesScreen(s: AppState) {
     LaunchedEffect(s.region, query) {
         delay(400)
         // 검색어를 지울 때에도 전체 결과를 다시 받아옵니다.
-        if (s.livePlacesLoaded) s.refreshCamps(query)
+        s.refreshCamps(query)
     }
     val filtered = s.places.filter { p ->
         (s.region == "전국" || p.region == s.region) &&
@@ -1491,6 +1660,10 @@ private fun PlacePlanAction(s: AppState, p: Place, canPlan: Boolean) {
                 ActionButton("이동 정보", Modifier.weight(1f), filled = false) { s.navigate("trip_travel") }
                 ActionButton("에너지", Modifier.weight(1f), filled = false) { s.navigate("energy") }
             }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ActionButton("여행 기록", Modifier.weight(1f), filled = false) { s.navigate("diary") }
+                ActionButton("주변 즐길거리", Modifier.weight(1f), filled = false) { s.navigate("nearby") }
+            }
         }
     } else {
         Text("이 여행 기간의 차량 숙박 허용을 확인해 주세요.", color = Gold, fontSize = 22.sp)
@@ -1556,6 +1729,11 @@ private fun PlaceDetailRight(p: Place, canPlan: Boolean, modifier: Modifier) {
     val ctx = LocalContext.current
     Column(modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
         SectionTitle("시설·위치", "정확한 화장실 건물 위치는 현장 지도 확인")
+        val point = p.coordinates?.let { CampsiteCoordinates.from(it.latitude, it.longitude) }
+        if (point != null) {
+            Text("공식 경도 (mapX) · ${point.longitude}", color=Gold, fontSize=23.sp)
+            Text("공식 위도 (mapY) · ${point.latitude}", color=Gold, fontSize=23.sp)
+        } else Text("공식 좌표 · 확인 필요", color=Gold, fontSize=23.sp)
         val overnight = p.overnightAllowed.takeIf { p.kind == CampingPlaceKind.CAMPGROUND || canPlan }
         val facilitySummary = listOf(
             "장소 유형 · ${p.kind.label}",
@@ -1577,6 +1755,8 @@ private fun PlaceDetailRight(p: Place, canPlan: Boolean, modifier: Modifier) {
             Text("등록 부대시설 · ${p.services}", color = Frost, fontSize = 22.sp)
         }
         if (p.kind == CampingPlaceKind.CAMPGROUND) {
+            RecommendationField("주차 가능 · 확인 필요")
+            RecommendationField("취사 가능 · 확인 필요")
             RecommendationField("등록 업종 · ${p.siteType.ifBlank { "확인 필요" }}")
             RecommendationField("등록 운영상태 · ${p.businessStatus.ifBlank { "확인 필요" }}")
         } else p.permit?.let { permit ->
@@ -1672,7 +1852,7 @@ private fun PackingMain(s:AppState,items:List<PackItem>,groups:List<String>,tab:
                         Text(item.description, color = Muted, fontSize = 19.sp, lineHeight = 24.sp)
                     }
                 }
-                Text(item.group,color=Muted,fontSize=24.sp)
+                Text(item.priority.label, color = Muted, fontSize = 19.sp)
             }
         }
     }
@@ -1709,7 +1889,12 @@ private fun PackingShare(s:AppState,all:List<PackItem>,modifier:Modifier,ctx:Con
 
 
 @Composable
-private fun StayScreen(s: AppState, energy: VehicleEnergy) {
+private fun StayScreen(
+    s: AppState, energy: VehicleEnergy, scene: TimeScene, ambience: AmbienceRecommendation?,
+    restAllowed: Boolean, started: Boolean, canStart: Boolean, anotherStay: Boolean,
+    morningSummary: String,
+    onStart: () -> Unit, onEnd: () -> Unit
+) {
     val soc = energy.soc.valueOrNull()
     val energyLabel = soc?.let { "배터리 잔량 $it%" } ?: "배터리 잔량 확인 필요"
     val audio = LocalNatureAudio.current
@@ -1718,11 +1903,38 @@ private fun StayScreen(s: AppState, energy: VehicleEnergy) {
         Column(Modifier.fillMaxHeight().fillMaxWidth(if(wide) .86f else 1f),verticalArrangement=Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment=Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("${s.selectedPlace.name}  ·  ${s.music}",color=Frost,fontSize=27.sp,fontWeight=FontWeight.Bold,maxLines=1)
+                    Text("${s.selectedPlace.name}  ·  ${scene.nameLabel}",color=Frost,fontSize=29.sp,fontWeight=FontWeight.Bold,maxLines=2,overflow=TextOverflow.Ellipsis)
+                    Text(
+                        when {
+                            started -> "차박 중"
+                            anotherStay -> "다른 여행에서 차박 중"
+                            s.activeTrip.diary.archived -> "보관된 여행 · 여행 기록에서 보관을 해제할 수 있어요"
+                            canStart -> "주차 후 차박을 시작하세요"
+                            else -> "차량 상태 확인 필요 · 시작 제한"
+                        },
+                        color = Muted, fontSize = 18.sp
+                    )
+                    if (started && restAllowed) {
+                        Text(morningSummary, color = Muted, fontSize = 18.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (ambience != null && restAllowed) {
+                        val reason = if (s.themeIndex < 0) ambience.reason else "${scene.nameLabel} · 수동 테마 유지"
+                        Text("$reason · 추천 ${ambience.sound}", color = Gold, fontSize = 19.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
-                ActionButton("차박 종료",Modifier.width(145.dp),filled=false,onClick={audio?.stop();s.home()})
+                if (started) {
+                    ActionButton("차박 종료", Modifier.width(170.dp), filled = false) { audio?.stop(); onEnd() }
+                } else if (canStart) {
+                    ActionButton("차박 시작", Modifier.width(170.dp), onClick = onStart)
+                }
             }
-            if(wide) {
+            if (!restAllowed) {
+                GlassPanel(Modifier.fillMaxWidth()) {
+                    SectionTitle("차박 휴식", "차량 상태가 허용될 때 자연음과 분위기를 조작할 수 있어요.")
+                }
+            } else if(wide) {
                 Row(Modifier.weight(1f),horizontalArrangement=Arrangement.spacedBy(12.dp)) {
                     GlassPanel(Modifier.weight(1.42f).fillMaxHeight()) {
                         Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
@@ -1737,6 +1949,9 @@ private fun StayScreen(s: AppState, energy: VehicleEnergy) {
                             Text("ϟ 스마트 에너지", color = Frost, fontSize = 27.sp, fontWeight = FontWeight.Bold)
                             Text(energyLabel, color = Gold, fontSize = 25.sp)
                             EnergyWarning(s.activeTrip.energyPlan, soc)
+                            s.activeTrip.energyPlan.availablePercent(soc)?.let {
+                                Text("차박용 사용 가능 $it%p", color = Muted, fontSize = 20.sp)
+                            }
                         }
                     }
                 }
@@ -1755,10 +1970,11 @@ private fun StayScreen(s: AppState, energy: VehicleEnergy) {
                     }
                 }
             }
-            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(13.dp)) {
+            if (restAllowed) Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(13.dp)) {
                 StayFeature("♧","환경 조성",Modifier.weight(1f)){s.navigate("environment")}
                 StayFeature("☀","스마트 모닝",Modifier.weight(1f)){s.navigate("morning")}
-                StayFeature("▤","차박 기록",Modifier.weight(1f)){s.openDiary(-1);s.navigate("diary")}
+                StayFeature("▤","차박 기록",Modifier.weight(1f)){s.navigate("diary")}
+                StayFeature("⌖","주변 즐길거리",Modifier.weight(1f)){s.navigate("nearby")}
             }
         }
     }
@@ -1769,7 +1985,9 @@ private fun CompactMusicPlayer(s:AppState,modifier:Modifier,onOpen:()->Unit) {
     val audio = LocalNatureAudio.current
     Column(modifier,verticalArrangement=Arrangement.spacedBy(8.dp)) {
         Row(Modifier.weight(1f),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically) {
-            AlbumArt(Modifier.fillMaxHeight().aspectRatio(1f))
+            BoxWithConstraints(Modifier.weight(.9f).fillMaxHeight(),contentAlignment=Alignment.Center) {
+                AlbumArt(Modifier.size(minOf(maxWidth,maxHeight)), s.natureSound)
+            }
             Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(5.dp)) {
                 Text("CHABAK NATURE",color=Gold,fontSize=20.sp,fontWeight=FontWeight.Bold)
                 Text(s.natureSound,color=Frost,fontSize=30.sp,fontWeight=FontWeight.Bold,maxLines=1)
@@ -1793,9 +2011,9 @@ private fun CompactMusicPlayer(s:AppState,modifier:Modifier,onOpen:()->Unit) {
 }
 
 @Composable
-private fun AlbumArt(modifier:Modifier=Modifier) {
+private fun AlbumArt(modifier:Modifier=Modifier, sound:String="숲소리") {
     Box(modifier.clip(RoundedCornerShape(18.dp))) {
-        ScenicResource(R.drawable.chabak_night_photo,Modifier.fillMaxSize(),ContentScale.Crop)
+        ScenicResource(when(sound) { "빗소리" -> R.drawable.chabak2_cover_rain; "파도소리" -> R.drawable.chabak2_cover_ocean; else -> R.drawable.chabak2_cover_forest },Modifier.fillMaxSize(),ContentScale.Crop)
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x12071322),Color(0xC0081A26)))))
         Column(Modifier.align(Alignment.BottomStart).padding(11.dp)) {
             Text("CHABAK",color=Frost,fontSize=24.sp,fontWeight=FontWeight.Bold)
@@ -1806,7 +2024,7 @@ private fun AlbumArt(modifier:Modifier=Modifier) {
 
 @Composable
 private fun PlayerControl(symbol:String,primary:Boolean=false,onClick:()->Unit) {
-    Box(Modifier.size(if(primary) 60.dp else 48.dp)
+    Box(Modifier.size(if(primary) 76.dp else 64.dp)
         .clip(RoundedCornerShape(30.dp))
         .background(if(primary) Gold else Color(0x28FFFFFF))
         .border(1.dp,if(primary) Gold else GlassBorder,RoundedCornerShape(30.dp))
@@ -1874,6 +2092,10 @@ private fun PlaylistOptions(s:AppState,genres:List<String>,modifier:Modifier) {
             Slider(value=s.natureVolume,onValueChange={audio?.setVolume(it)},modifier=Modifier.weight(1f),valueRange=0f..1f)
             Text("${(s.natureVolume*100).toInt()}%",color=Gold,fontSize=21.sp)
         }
+        Row(horizontalArrangement=Arrangement.spacedBy(14.dp),verticalAlignment=Alignment.CenterVertically) {
+            ChabakImage(R.drawable.chabak2_cover_jazz, Modifier.size(116.dp).clip(RoundedCornerShape(16.dp)))
+            Text("음악 취향 · 추천 콘셉트\n스트리밍 미연동",color=Gold,fontSize=24.sp)
+        }
         Text("음악 취향 선택 · 추천 전용",fontSize=28.sp,color=Frost,fontWeight=FontWeight.Bold)
         genres.chunked(2).forEach { pair ->
             Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -1897,38 +2119,72 @@ private fun PlaylistOptions(s:AppState,genres:List<String>,modifier:Modifier) {
 }
 
 @Composable
-private fun EnvironmentScreen(s:AppState) {
-    val scenes=listOf("별빛","숲속","비 오는 밤","노을")
-    val sounds=listOf("숲소리","빗소리","파도소리","백색소음","조용하게")
+private fun EnvironmentScreen(
+    s: AppState, recommendation: AmbienceRecommendation?, scene: TimeScene, selectTheme: (Int) -> Unit
+) {
+    val context = LocalContext.current
+    var lightStatus by remember(context) { mutableStateOf("지원 확인 중") }
+    LaunchedEffect(context) { lightStatus = readAmbientBrightnessCapability(context) }
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val wide=maxWidth>=760.dp
-        if(wide) Row(Modifier.fillMaxSize(),horizontalArrangement=Arrangement.spacedBy(13.dp)) {
-            GlassPanel(Modifier.weight(1f).fillMaxHeight()) { EnvironmentLeft(s,scenes,Modifier.weight(1f)) }
-            GlassPanel(Modifier.weight(1f).fillMaxHeight()) { EnvironmentRight(s,sounds,Modifier.weight(1f)) }
-        } else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            GlassPanel(Modifier.fillMaxWidth()) { EnvironmentLeft(s,scenes,Modifier.height(320.dp)) }
-            GlassPanel(Modifier.fillMaxWidth()) { EnvironmentRight(s,sounds,Modifier.height(330.dp)) }
+        if (maxWidth >= 760.dp) Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(13.dp)) {
+            GlassPanel(Modifier.weight(1f).fillMaxHeight()) {
+                EnvironmentLeft(s.themeIndex, scene, recommendation, selectTheme, Modifier.weight(1f))
+            }
+            GlassPanel(Modifier.weight(1f).fillMaxHeight()) {
+                EnvironmentRight(s, recommendation, lightStatus, Modifier.weight(1f))
+            }
+        } else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            GlassPanel(Modifier.fillMaxWidth()) {
+                EnvironmentLeft(s.themeIndex, scene, recommendation, selectTheme, Modifier.height(340.dp))
+            }
+            GlassPanel(Modifier.fillMaxWidth()) {
+                EnvironmentRight(s, recommendation, lightStatus, Modifier.height(400.dp))
+            }
         }
     }
 }
 
 @Composable
-private fun EnvironmentLeft(s:AppState,scenes:List<String>,modifier:Modifier) {
-    SectionTitle("나만의 차박 분위기","고른 분위기를 다음 차박에도 이어가요")
-    Column(modifier,verticalArrangement=Arrangement.spacedBy(11.dp)) {
-        ScenicResource(when(s.ambience){"숲속"->R.drawable.chabak_day_photo;"노을"->R.drawable.chabak_evening_photo;"비 오는 밤"->R.drawable.chabak_morning_photo;else->R.drawable.chabak_night_photo},Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(14.dp)),ContentScale.Crop)
-        Row(horizontalArrangement=Arrangement.spacedBy(7.dp)){scenes.take(2).forEach{t->OutlineChip(t,s.ambience==t,Modifier.weight(1f),onClick={s.ambience=t;s.saveRest()})}}
-        Row(horizontalArrangement=Arrangement.spacedBy(7.dp)){scenes.drop(2).forEach{t->OutlineChip(t,s.ambience==t,Modifier.weight(1f),onClick={s.ambience=t;s.saveRest()})}}
+private fun EnvironmentLeft(
+    manualIndex: Int, scene: TimeScene, recommendation: AmbienceRecommendation?,
+    selectTheme: (Int) -> Unit, modifier: Modifier
+) {
+    SectionTitle("차박 분위기 · 규칙 기반", recommendation?.reason ?: "차박을 시작하면 여행 환경을 추천해요.")
+    val preview = when (scene) {
+        TimeScene.MORNING -> R.drawable.chabak2_bg_morning
+        TimeScene.DAY -> R.drawable.chabak2_bg_day
+        TimeScene.SUNSET -> R.drawable.chabak2_bg_sunset
+        TimeScene.NIGHT -> R.drawable.chabak2_bg_night
+    }
+    Column(modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        ScenicResource(preview, Modifier.fillMaxWidth().aspectRatio(16f/9f).clip(RoundedCornerShape(14.dp)))
+        OutlineChip("자동 테마", manualIndex == -1, Modifier.fillMaxWidth()) { selectTheme(-1) }
+        TimeScene.entries.chunked(2).forEach { pair ->
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                pair.forEach {
+                    OutlineChip(it.nameLabel, manualIndex == it.index, Modifier.weight(1f)) { selectTheme(it.index) }
+                }
+            }
+        }
     }
 }
 
 @Composable
-private fun EnvironmentRight(s:AppState,sounds:List<String>,modifier:Modifier) {
+private fun EnvironmentRight(
+    s: AppState, recommendation: AmbienceRecommendation?, lightStatus: String, modifier: Modifier
+) {
     val audio = LocalNatureAudio.current
-    SectionTitle("자연음 · 분위기","자연음은 실제 재생 · 차량 조명은 아직 시연")
+    SectionTitle("조명 · 자연음", "차량 제어와 화면 미리보기를 구분합니다.")
     Column(modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-        Text("듣고 싶은 소리",color=Frost,fontSize=26.sp,fontWeight=FontWeight.Bold)
-        sounds.chunked(2).forEach { line ->
+        LightingPreview()
+        Text("차량 조명 연동 준비 중 · $lightStatus",color=Gold,fontSize=22.sp)
+        recommendation?.let {
+            ActionButton("추천 ${it.sound} 재생", Modifier.fillMaxWidth()) {
+                audio?.select(it.sound)
+                audio?.start()
+            }
+        }
+        natureTrackNames.chunked(2).forEach { line ->
             Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) {
                 line.forEach { sound ->
                     OutlineChip(sound,s.natureSound==sound,Modifier.weight(1f),onClick={audio?.select(sound)})
@@ -1949,63 +2205,72 @@ private fun EnvironmentRight(s:AppState,sounds:List<String>,modifier:Modifier) {
             Text("${(s.natureVolume*100).toInt()}%",color=Gold,fontSize=21.sp)
         }
         if(s.naturePlaybackError.isNotEmpty()) Text(s.naturePlaybackError,color=Gold,fontSize=19.sp)
-        Text("실제 자연음은 인터넷 없이 재생돼요. 차량 조명 자동 제어는 연결 전입니다.",color=Muted,fontSize=19.sp)
-        ActionButton("내 분위기 저장하기",Modifier.fillMaxWidth(),onClick={s.saveRest()})
+        Text("차량 조명 연동 준비 중 · $lightStatus", color = Muted, fontSize = 19.sp)
     }
 }
 
 @Composable
-private fun MorningScreen(s: AppState) {
+private fun MorningScreen(s: AppState, activeStay: Boolean, allowWakeScene: Boolean, canEdit: () -> Boolean) {
     val ctx = LocalContext.current
+    val tripId = s.activeTrip.tripId
+    var wakeMinuteOfDay by rememberSaveable(tripId) { mutableIntStateOf(s.wakeMinuteOfDay) }
+    var pendingTest by rememberSaveable(tripId) { mutableStateOf<Boolean?>(null) }
     val sounds = listOf("숲소리", "빗소리", "파도소리", "백색소음")
-    val notificationPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        s.morningStatus = if (granted) "알림이 허용됐어요. '알람 예약하기'를 다시 눌러 주세요."
-        else "알림 권한이 없어 알람을 예약하지 않았어요."
+    fun schedule(test: Boolean) {
+        if (!canEdit()) return
+        s.morningStatus = if (test) ChabakMorningScheduler.scheduleTest(ctx, tripId)
+            else ChabakMorningScheduler.scheduleNext(ctx, tripId, wakeMinuteOfDay / 60, wakeMinuteOfDay % 60)
     }
-    val applyAlarm: () -> Unit = {
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val test = pendingTest
+        pendingTest = null
+        if (granted && test != null) schedule(test)
+        else if (!granted) s.morningStatus = "알림 권한이 없어 알람을 예약하지 않았어요."
+    }
+    fun request(test: Boolean) {
+        if (!canEdit() || (!test && !s.saveWakeTime(tripId, wakeMinuteOfDay))) return
         s.saveMorning()
-        when {
-            !s.morningEnabled -> {
-                ChabakMorningScheduler.cancel(ctx)
-                s.morningStatus = "알람을 해제했어요."
-            }
-            Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
                 ctx, Manifest.permission.POST_NOTIFICATIONS
-            ) != PackageManager.PERMISSION_GRANTED -> {
-                s.morningStatus = "알림 권한 허용 후 '알람 예약하기'를 다시 눌러 주세요."
-                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-            else -> s.morningStatus = ChabakMorningScheduler.scheduleNext(ctx, s.wakeHour, s.wakeMinute)
-        }
+            ) != PackageManager.PERMISSION_GRANTED) {
+            pendingTest = test
+            permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else schedule(test)
     }
-    val testAlarm: () -> Unit = {
-        s.saveMorning()
-        when {
-            Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED -> {
-                s.morningStatus = "알림 권한을 먼저 허용해 주세요."
-                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-            else -> s.morningStatus = ChabakMorningScheduler.scheduleTest(ctx)
+    LaunchedEffect(tripId) { s.morningStatus = ChabakMorningScheduler.status(ctx, tripId) }
+    if (!activeStay || !allowWakeScene) {
+        GlassPanel(Modifier.fillMaxWidth()) {
+            SectionTitle("스마트 모닝", if (!activeStay) "차박 중 화면에서 차박을 시작해 주세요."
+                else "차량 화면 조작이 허용되면 예약을 변경할 수 있어요.")
+            Text("저장된 기상 시각 · %02d:%02d".format(Locale.KOREA, wakeMinuteOfDay / 60, wakeMinuteOfDay % 60),
+                color = Frost, fontSize = 24.sp)
+            Text(s.morningStatus, color = Gold, fontSize = 22.sp)
         }
+        return
     }
-    LaunchedEffect(Unit) {
-        s.morningStatus = ChabakMorningScheduler.status(ctx)
-        s.morningEnabled = ChabakMorningScheduler.isScheduled(ctx)
+    val changeTime: (Int, Int) -> Unit = { hour, minute ->
+        if (canEdit()) wakeMinuteOfDay = hour * 60 + minute
+    }
+    val applyAlarm: () -> Unit = { request(false) }
+    val testAlarm: () -> Unit = { request(true) }
+    val cancelAlarm: () -> Unit = {
+        if (canEdit()) {
+            ChabakMorningScheduler.cancel(ctx)
+            s.morningStatus = "예약을 취소했어요. 기상 시각은 저장돼 있어요."
+        }
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val wide = maxWidth >= 760.dp
         if (wide) Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(13.dp)) {
             GlassPanel(Modifier.weight(1f).fillMaxHeight()) {
-                MorningLeft(s, ctx, Modifier.weight(1f))
+                MorningLeft(s, ctx, wakeMinuteOfDay, changeTime, canEdit, Modifier.weight(1f))
             }
             GlassPanel(Modifier.weight(1f).fillMaxHeight()) {
-                MorningRight(s, sounds, Modifier.weight(1f), applyAlarm, testAlarm)
+                MorningRight(s, sounds, Modifier.weight(1f), applyAlarm, cancelAlarm, testAlarm)
             }
         } else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            GlassPanel(Modifier.fillMaxWidth()) { MorningLeft(s, ctx, Modifier.height(660.dp)) }
-            GlassPanel(Modifier.fillMaxWidth()) { MorningRight(s, sounds, Modifier.height(570.dp), applyAlarm, testAlarm) }
+            GlassPanel(Modifier.fillMaxWidth()) { MorningLeft(s, ctx, wakeMinuteOfDay, changeTime, canEdit, Modifier.height(660.dp)) }
+            GlassPanel(Modifier.fillMaxWidth()) { MorningRight(s, sounds, Modifier.height(570.dp), applyAlarm, cancelAlarm, testAlarm) }
         }
     }
 }
@@ -2113,7 +2378,10 @@ private fun ChabakAlarmWheelPicker(hour24: Int, minute: Int, onTimeChanged: (Int
 }
 
 @Composable
-private fun MorningLeft(s: AppState, ctx: Context, modifier: Modifier) {
+private fun MorningLeft(
+    s: AppState, ctx: Context, wakeMinuteOfDay: Int, changeTime: (Int, Int) -> Unit,
+    canEdit: () -> Boolean, modifier: Modifier
+) {
     val musicPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
             try {
@@ -2136,27 +2404,12 @@ private fun MorningLeft(s: AppState, ctx: Context, modifier: Modifier) {
     }
     SectionTitle("스마트 모닝", "자연음으로 편안하게 일어나요")
     Column(modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Column(Modifier.weight(1f)) {
-                Text("알람 시간", color=Muted, fontSize=21.sp)
-                Text("숫자를 위아래로 밀어 설정하세요", color=Gold, fontSize=17.sp)
-            }
-            Switch(checked = s.morningEnabled, onCheckedChange = { enabled ->
-                s.morningEnabled = enabled
-                s.saveMorning()
-                if (!enabled) { ChabakMorningScheduler.cancel(ctx); s.morningStatus = "알람을 해제했어요." }
-                else s.morningStatus = "알람 예약하기 버튼으로 활성화해 주세요."
-            }, colors = SwitchDefaults.colors(checkedThumbColor = Frost, checkedTrackColor = Color(0xFF87BC7D)))
-        }
+        Text("기상 시각 · %02d:%02d (한국 시간)".format(Locale.KOREA, wakeMinuteOfDay / 60, wakeMinuteOfDay % 60),
+            color = Frost, fontSize = 25.sp)
         ChabakAlarmWheelPicker(
-            hour24 = s.wakeHour,
-            minute = s.wakeMinute,
-            onTimeChanged = { h, m ->
-                s.wakeHour = h
-                s.wakeMinute = m
-                s.saveMorning()
-                s.morningStatus = "시간을 변경했어요. '알람 예약하기'를 누르면 적용됩니다."
-            }
+            hour24 = wakeMinuteOfDay / 60,
+            minute = wakeMinuteOfDay % 60,
+            onTimeChanged = changeTime
         )
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement=Arrangement.spacedBy(10.dp)) {
@@ -2166,7 +2419,7 @@ private fun MorningLeft(s: AppState, ctx: Context, modifier: Modifier) {
                 s.sunriseForegroundOptIn = enabled; s.saveMorning()
             })
         }
-        Text("정차 중에만 켜주세요 · 차량 주행 상태 미연동", color=Muted, fontSize=18.sp)
+        Text("차량 화면 조작이 허용될 때만 풍경을 표시해요", color=Muted, fontSize=18.sp)
         Text("아침 05:00~10:59 · 햇살과 자연음 / 다른 시간 · 풍경과 나만의 음악", color=Gold, fontSize=19.sp)
         ActionButton("♫ 나만의 알람 음악 선택", Modifier.fillMaxWidth(), filled=false,
             onClick={ musicPicker.launch(arrayOf("audio/*")) })
@@ -2179,12 +2432,12 @@ private fun MorningLeft(s: AppState, ctx: Context, modifier: Modifier) {
                     .remove("wakeMusicUri").remove("wakeMusicName").apply()
             })
         }
-        Text("일출처럼 깨우기 (차량 조명 시연)", color = Frost, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Text("화면 일출 연출", color = Frost, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Box(Modifier.fillMaxWidth().height(75.dp).clip(RoundedCornerShape(16.dp))
             .background(Brush.horizontalGradient(listOf(Color(0xFFB86C80), Color(0xFFFFD387))))) {
             Text("☀", fontSize = 48.sp, color = Frost, modifier = Modifier.align(Alignment.Center))
         }
-        Text("조명 연출 시간 · 차량 연동 전", color = Muted, fontSize = 22.sp)
+        Text("화면이 밝아지는 시간", color = Muted, fontSize = 22.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             listOf(5,15,30).forEach { m ->
                 OutlineChip("${m}분", s.morningFade == m, Modifier.weight(1f), onClick = {
@@ -2194,11 +2447,13 @@ private fun MorningLeft(s: AppState, ctx: Context, modifier: Modifier) {
         }
         SettingSlider("조명 밝기 시연", s.morningLevel * 100f, "${(s.morningLevel * 100).toInt()}%",
             0f..100f, { s.morningLevel = it / 100f; s.saveMorning() })
-        ActionButton("일출 화면 미리보기", Modifier.fillMaxWidth(), filled = false, onClick = {
-            s.wakeScenePreview = true
-            s.wakeSceneLive = false
-            s.wakeTransitionSerial++
-        })
+        ActionButton("일출 화면 미리보기", Modifier.fillMaxWidth(), filled = false) {
+            if (canEdit()) {
+                s.wakeScenePreview = true
+                s.wakeSceneLive = false
+                s.wakeTransitionSerial++
+            }
+        }
     }
 }
 
@@ -2208,6 +2463,7 @@ private fun MorningRight(
     sounds: List<String>,
     modifier: Modifier,
     onSchedule: () -> Unit,
+    onCancel: () -> Unit,
     onTest: () -> Unit
 ) {
     val natureAudio = LocalNatureAudio.current
@@ -2232,7 +2488,10 @@ private fun MorningRight(
             })
             ActionButton("■ 끄기", Modifier.weight(1f), filled = false, onClick = { natureAudio?.stop() })
         }
-        ActionButton(if(s.morningEnabled) "알람 예약하기" else "알람 해제", Modifier.fillMaxWidth(), onClick = onSchedule)
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            ActionButton("예약 저장", Modifier.weight(1f), onClick = onSchedule)
+            ActionButton("예약 취소", Modifier.weight(1f), filled = false, onClick = onCancel)
+        }
         ActionButton("1분 뒤 시험 알람", Modifier.fillMaxWidth(), filled = false, onClick = onTest)
         Text("알람을 끄거나 5분 뒤 다시 울리려면 기기 알림창의 버튼을 사용하세요.", color = Muted, fontSize = 20.sp)
         Text("※ 정확한 알람 권한이 없는 Pleos에서는 예약 시각보다 늦게 울릴 수 있어요. 기기/앱 제한에 따라 울리지 않을 수도 있습니다.", color = Gold, fontSize = 18.sp)
@@ -2276,85 +2535,6 @@ private fun MorningWakeScene(s: AppState, phase: TimeScene, onStop: () -> Unit, 
 }
 
 @Composable
-private fun DiaryScreen(s:AppState) {
-    val ctx=LocalContext.current
-    val photoPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri:Uri?->
-        if(uri!=null) {
-            try { ctx.contentResolver.takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION) }catch(_:Exception){}
-            s.dayPhoto=uri.toString()
-        }
-    }
-    LaunchedEffect(Unit) { if(s.dayTitle.isBlank()) s.openDiary(-1) }
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        val wide=maxWidth>=760.dp
-        if(wide) Row(Modifier.fillMaxSize(),horizontalArrangement=Arrangement.spacedBy(13.dp)) {
-            GlassPanel(Modifier.weight(.75f).fillMaxHeight()) { DiaryList(s,Modifier.weight(1f)) }
-            GlassPanel(Modifier.weight(1.25f).fillMaxHeight()) { DiaryEditor(s,Modifier.weight(1f),onPhoto={photoPicker.launch(arrayOf("image/*"))}) }
-        } else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-            GlassPanel(Modifier.fillMaxWidth()) { DiaryList(s,Modifier.height(280.dp)) }
-            GlassPanel(Modifier.fillMaxWidth()) { DiaryEditor(s,Modifier.height(510.dp),onPhoto={photoPicker.launch(arrayOf("image/*"))}) }
-        }
-    }
-}
-
-@Composable
-private fun DiaryList(s:AppState,modifier:Modifier) {
-    Row(verticalAlignment=Alignment.CenterVertically) { Text("나의 차박 기록",color=Frost,fontSize=29.sp,fontWeight=FontWeight.Bold,modifier=Modifier.weight(1f));OutlineChip("+ 새 기록",false,onClick={s.openDiary(-1)}) }
-    Spacer(Modifier.height(12.dp))
-    Column(modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(9.dp)) {
-        if(s.diaries.isEmpty()) {
-            Text("아직 저장한 기록이 없어요.\n오늘의 차박부터 남겨 보세요.",color=Muted,fontSize=24.sp,lineHeight=27.sp)
-        }
-        s.diaries.forEachIndexed {idx,d->
-            Row(Modifier.fillMaxWidth().heightIn(min=100.dp).clip(RoundedCornerShape(15.dp)).background(if(s.editingDiary==idx) Color(0x8B695F38) else Color(0x75325052)).border(1.dp,if(s.editingDiary==idx) Gold else GlassBorder,RoundedCornerShape(15.dp)).clickable {s.openDiary(idx)}.padding(8.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(10.dp)) {
-                DiaryPhoto(d.photoUri,R.drawable.chabak_night_photo,Modifier.size(100.dp,80.dp).clip(RoundedCornerShape(10.dp)))
-                Column(Modifier.weight(1f)) { Text("${d.date} · ${d.place}",color=Muted,fontSize=24.sp,maxLines=1);Text(d.title,color=Frost,fontSize=24.sp,fontWeight=FontWeight.Bold,maxLines=2) }
-                Text("›",color=Gold,fontSize=33.sp)
-            }
-        }
-    }
-    Text("일기와 사진 선택 결과는 이 기기에만 저장됩니다.",color=Muted,fontSize=24.sp)
-}
-
-@Composable
-private fun DiaryEditor(s:AppState,modifier:Modifier,onPhoto:()->Unit) {
-    val ctx = LocalContext.current
-    SectionTitle("오늘의 기록","사진과 추억을 간단하게 남겨요")
-    Column(modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
-        Text("${LocalDate.now()}  |  ${s.selectedPlace.name}",color=Muted,fontSize=24.sp)
-        InputDemo(s.dayTitle,{s.dayTitle=it},"오늘의 기록 제목")
-        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            DiaryPhoto(s.dayPhoto,R.drawable.chabak_lakeside_car,Modifier.weight(1f).height(132.dp).clip(RoundedCornerShape(12.dp)))
-            Box(Modifier.weight(.6f).height(132.dp).clip(RoundedCornerShape(12.dp)).border(1.dp,GlassBorder,RoundedCornerShape(12.dp)).clickable(onClick=onPhoto),contentAlignment=Alignment.Center) {Text("＋\n사진 추가",fontSize=24.sp,color=Frost,lineHeight=27.sp)}
-        }
-        Text("오늘의 기분",color=Frost,fontSize=24.sp,fontWeight=FontWeight.Bold)
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(7.dp)) {listOf("편안해요","신나요","행복해요","아쉬워요").forEach {m->OutlineChip(m,m==s.dayMood,onClick={s.dayMood=m})}}
-        Text("한 줄 남기기",color=Frost,fontSize=24.sp,fontWeight=FontWeight.Bold)
-        TextField(value=s.dayNote,onValueChange={s.dayNote=it},placeholder={Text("오늘 가장 좋았던 순간은 무엇인가요?",color=Muted)},modifier=Modifier.fillMaxWidth().heightIn(min=110.dp),minLines=2,maxLines=5,colors=TextFieldDefaults.colors(focusedTextColor=Frost,unfocusedTextColor=Frost,focusedContainerColor=Color(0x95385256),unfocusedContainerColor=Color(0x95385256),focusedIndicatorColor=Mint,unfocusedIndicatorColor=GlassBorder))
-    }
-    Spacer(Modifier.height(9.dp))
-    Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-        ActionButton("동행인과 공유",Modifier.weight(1f),filled=false,onClick={
-            val i=Intent(Intent.ACTION_SEND).apply {type="text/plain";putExtra(Intent.EXTRA_TEXT,"CHABAK 차박 기록\n${s.dayTitle}\n${s.dayNote}")}
-            try{ctx.startActivity(Intent.createChooser(i,"차박 기록 공유"))}catch(_:Exception){}
-        })
-        ActionButton("기록 저장",Modifier.weight(1f),onClick={s.saveDiary();Toast.makeText(ctx,"차박 기록을 저장했어요",Toast.LENGTH_SHORT).show()})
-    }
-}
-
-@Composable
-private fun DiaryPhoto(uri:String,fallback:Int,modifier:Modifier) {
-    val ctx=LocalContext.current
-    val bitmap:ImageBitmap?=remember(uri) {
-        if(uri.isBlank()) null else try {
-            ctx.contentResolver.openInputStream(Uri.parse(uri))?.use { stream->BitmapFactory.decodeStream(stream,null,BitmapFactory.Options().apply{inSampleSize=4})?.asImageBitmap() }
-        }catch(_:Exception){null}
-    }
-    if(bitmap!=null) Image(bitmap=bitmap,contentDescription="차박 기록 사진",contentScale=ContentScale.Crop,modifier=modifier)
-    else ScenicResource(fallback,modifier,ContentScale.Crop)
-}
-
-@Composable
 internal fun InputDemo(value:String,onValue:(String)->Unit,hint:String,modifier:Modifier=Modifier) {
     OutlinedTextField(value=value,onValueChange=onValue,modifier=modifier.fillMaxWidth(),singleLine=true,textStyle=androidx.compose.ui.text.TextStyle(color=Frost,fontSize=24.sp),placeholder={Text(hint,color=Muted,fontSize=24.sp)},shape=RoundedCornerShape(12.dp),colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=Mint,unfocusedBorderColor=GlassBorder,focusedContainerColor=Color(0x20FFFFFF),unfocusedContainerColor=Color(0x20FFFFFF),cursorColor=Mint))
 }
@@ -2368,6 +2548,10 @@ private object ChabakMorningScheduler {
     private const val REQUEST_CODE = 4101
     private const val TEST_REQUEST_CODE = 4111
     const val KEY_TEST_TIME = "chabak_alarm_test_at"
+    private const val KEY_STAY_TRIP = "morning_stay_trip"
+    private const val KEY_ALARM_TRIP = "morning_alarm_trip"
+    private const val KEY_TEST_TRIP = "morning_test_trip"
+    private const val KEY_LAST_TRIP = "morning_last_trip"
     const val KEY_LAST_TRIGGER = "chabak_alarm_last_trigger"
     const val KEY_LAST_WAS_TEST = "chabak_alarm_last_was_test"
     const val ACTION_RING = "com.chabak.app.MORNING_RING"
@@ -2408,20 +2592,32 @@ private object ChabakMorningScheduler {
         return exact
     }
 
-    fun isScheduled(context: Context) =
-        prefs(context).getLong(KEY_TIME, 0L) > System.currentTimeMillis()
+    fun stayTrip(context: Context): String? = prefs(context).getString(KEY_STAY_TRIP, null)
 
-    fun scheduleTest(context: Context): String {
+    fun startStay(context: Context, tripId: String) {
+        if (stayTrip(context) == tripId) return
+        cancel(context)
+        prefs(context).edit().putString(KEY_STAY_TRIP, tripId).apply()
+    }
+
+    fun endStay(context: Context, tripId: String) {
+        if (stayTrip(context) != tripId) return
+        prefs(context).edit().remove(KEY_STAY_TRIP).apply()
+        cancel(context)
+    }
+
+    fun scheduleTest(context: Context, tripId: String): String {
+        if (stayTrip(context) != tripId) return "차박을 먼저 시작해 주세요."
         val whenToRing = System.currentTimeMillis() + 60_000L
         return try {
             val exact = scheduleSystemAlarm(context, whenToRing, 4102, testIntent(context))
-            prefs(context).edit().putLong(KEY_TEST_TIME, whenToRing).apply()
+            prefs(context).edit().putLong(KEY_TEST_TIME, whenToRing).putString(KEY_TEST_TRIP, tripId).apply()
             if (exact) "1분 뒤 시험 알람 예약 완료 · 기존 아침 알람은 유지돼요."
             else "대체 시험 알람 예약 완료 · 약 1분 뒤 예정이지만 Pleos 절전 상태에 따라 늦어질 수 있어요."
         } catch (e: Exception) { "시험 알람 예약 실패: ${e.javaClass.simpleName}" }
     }
 
-    fun scheduleNext(context: Context, hour: Int, minute: Int): String {
+    fun scheduleNext(context: Context, tripId: String, hour: Int, minute: Int): String {
         val whenToRing = Calendar.getInstance(ChabakLegacyTimeZone).apply {
             set(Calendar.HOUR_OF_DAY, hour.coerceIn(0, 23))
             set(Calendar.MINUTE, minute.coerceIn(0, 59))
@@ -2429,17 +2625,18 @@ private object ChabakMorningScheduler {
             set(Calendar.MILLISECOND, 0)
             if (timeInMillis <= System.currentTimeMillis()) add(Calendar.DATE, 1)
         }.timeInMillis
-        return scheduleAt(context, whenToRing)
+        return scheduleAt(context, tripId, whenToRing)
     }
 
-    fun scheduleAt(context: Context, whenToRing: Long): String {
+    private fun scheduleAt(context: Context, tripId: String, whenToRing: Long): String {
+        if (stayTrip(context) != tripId) return "차박을 먼저 시작해 주세요."
         if (whenToRing <= System.currentTimeMillis()) return "미래 시각을 선택해 주세요."
         return try {
             val exact = scheduleSystemAlarm(context, whenToRing, 4102, ringIntent(context))
-            prefs(context).edit().putLong(KEY_TIME, whenToRing).putBoolean("morningEnabled", true).apply()
+            prefs(context).edit().putLong(KEY_TIME, whenToRing).putString(KEY_ALARM_TRIP, tripId).apply()
             val time = java.text.SimpleDateFormat("M월 d일 a h:mm", Locale.KOREA).apply { timeZone=ChabakLegacyTimeZone }.format(java.util.Date(whenToRing))
-            if (exact) "$time 정확한 알람 예약 완료"
-            else "$time 대체 알람 예약 완료 · Pleos 기기 사정으로 늦게 울릴 수 있어요."
+            if (exact) "다음 기상 · $time (정확한 알람)"
+            else "다음 기상 · $time (대체 알람 · 지연 가능)"
         } catch (e: Exception) {
             "알람 예약에 실패했어요: ${e.javaClass.simpleName}"
         }
@@ -2448,27 +2645,55 @@ private object ChabakMorningScheduler {
     fun cancel(context: Context) {
         manager(context).cancel(ringIntent(context))
         manager(context).cancel(testIntent(context))
-        prefs(context).edit().remove(KEY_TIME).remove(KEY_TEST_TIME).putBoolean("morningEnabled", false).apply()
+        prefs(context).edit().remove(KEY_TIME).remove(KEY_TEST_TIME)
+            .remove(KEY_ALARM_TRIP).remove(KEY_TEST_TRIP).remove(KEY_LAST_TRIP).apply()
+        context.getSystemService(NotificationManager::class.java).cancel(ChabakMorningPlaybackService.NOTIFICATION_ID)
         try { context.startService(Intent(context, ChabakMorningPlaybackService::class.java).setAction(ChabakMorningPlaybackService.ACTION_STOP)) }
         catch (_: Exception) { /* stopped service may not exist */ }
     }
 
-    fun onDelivered(context: Context) {
-        prefs(context).edit().remove(KEY_TIME).putBoolean("morningEnabled", false).apply()
+    fun consume(context: Context, test: Boolean): Boolean {
+        val prefs = prefs(context)
+        val tripId = stayTrip(context) ?: return false
+        val timeKey = if (test) KEY_TEST_TIME else KEY_TIME
+        val tripKey = if (test) KEY_TEST_TRIP else KEY_ALARM_TRIP
+        val scheduled = prefs.getLong(timeKey, 0L)
+        if (prefs.getString(tripKey, null) != tripId || scheduled <= 0L ||
+            scheduled > System.currentTimeMillis()) return false
+        prefs.edit().remove(timeKey).remove(tripKey)
+            .putLong(KEY_LAST_TRIGGER, System.currentTimeMillis())
+            .putBoolean(KEY_LAST_WAS_TEST, test)
+            .putString(KEY_LAST_TRIP, tripId).apply()
+        return true
     }
 
-    fun status(context: Context): String {
-        val next = prefs(context).getLong(KEY_TIME, 0L)
-        if (next == 0L || next <= System.currentTimeMillis()) return "예약된 알람이 없어요. 시간을 고르고 예약해 주세요."
-        val mode = if (canSchedule(context)) "정확한 알람 예약됨" else "대체 알람 예약됨 (시간 지연 가능)"
-        return "$mode · " + java.text.SimpleDateFormat("M월 d일 a h:mm", Locale.KOREA)
-            .apply { timeZone=ChabakLegacyTimeZone }.format(java.util.Date(next))
+    fun lastTriggerFor(context: Context, tripId: String): Long {
+        val prefs = prefs(context)
+        return if (prefs.getString(KEY_LAST_TRIP, null) == tripId) prefs.getLong(KEY_LAST_TRIGGER, 0L) else 0L
+    }
+
+    fun snooze(context: Context) {
+        val tripId = stayTrip(context) ?: return
+        if (lastTriggerFor(context, tripId) != 0L) scheduleAt(context, tripId, System.currentTimeMillis() + 5 * 60_000L)
+    }
+
+    fun status(context: Context, tripId: String): String {
+        val prefs = prefs(context)
+        val next = prefs.getLong(KEY_TIME, 0L)
+        if (prefs.getString(KEY_ALARM_TRIP, null) != tripId || next == 0L) return "예약된 모닝 알람이 없어요."
+        val mode = if (canSchedule(context)) "정확한 알람" else "대체 알람 · 지연 가능"
+        val time = java.text.SimpleDateFormat("M월 d일 a h:mm", Locale.KOREA)
+            .apply { timeZone = ChabakLegacyTimeZone }.format(java.util.Date(next))
+        return "다음 기상 · $time ($mode)"
     }
 
     fun restoreAfterBoot(context: Context) {
-        val next = prefs(context).getLong(KEY_TIME, 0L)
-        if (next > System.currentTimeMillis()) scheduleAt(context, next)
-        else if (next <= System.currentTimeMillis()) onDelivered(context)
+        val tripId = stayTrip(context) ?: return
+        val prefs = prefs(context)
+        if (prefs.getString(KEY_ALARM_TRIP, null) != tripId) return
+        val next = prefs.getLong(KEY_TIME, 0L)
+        if (next > System.currentTimeMillis()) scheduleAt(context, tripId, next)
+        else prefs.edit().remove(KEY_TIME).remove(KEY_ALARM_TRIP).apply()
     }
 }
 
@@ -2476,15 +2701,8 @@ class ChabakMorningReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val isTest = intent?.action == ChabakMorningScheduler.ACTION_TEST
         if (!isTest && intent?.action != ChabakMorningScheduler.ACTION_RING) return
-        val key = if (isTest) ChabakMorningScheduler.KEY_TEST_TIME else ChabakMorningScheduler.KEY_TIME
-        val prefs = context.getSharedPreferences("chabak_3", Context.MODE_PRIVATE)
-        if (prefs.getLong(key, 0L) == 0L) return // canceled / stale broadcast
-        if (isTest) prefs.edit().remove(key).apply()
-        else ChabakMorningScheduler.onDelivered(context)
-        prefs.edit()
-            .putLong(ChabakMorningScheduler.KEY_LAST_TRIGGER, System.currentTimeMillis())
-            .putBoolean(ChabakMorningScheduler.KEY_LAST_WAS_TEST, isTest)
-            .apply()
+        if (!ChabakMorningScheduler.consume(context, isTest)) return
+        android.util.Log.i("ChabakMorning", "alarm_delivered test=$isTest")
         val start = Intent(context, ChabakMorningPlaybackService::class.java)
             .setAction(ChabakMorningPlaybackService.ACTION_PLAY)
             .putExtra("chabak_test_alarm", isTest)
@@ -2492,7 +2710,8 @@ class ChabakMorningReceiver : BroadcastReceiver() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(start)
             else context.startService(start)
         } catch (_: Exception) {
-            // This can happen on vendor infotainment builds that disallow background playback.
+            ChabakMorningPlaybackService.showFallbackNotification(context, isTest)
+            android.util.Log.i("ChabakMorning", "background_playback_unavailable")
         }
     }
 }
@@ -2512,8 +2731,42 @@ class ChabakMorningPlaybackService : Service() {
         const val ACTION_PLAY = "com.chabak.app.MORNING_PLAY"
         const val ACTION_STOP = "com.chabak.app.MORNING_STOP"
         const val ACTION_SNOOZE = "com.chabak.app.MORNING_SNOOZE"
-        private const val CHANNEL_ID = "chabak_morning_alarm_v1"
-        private const val NOTIFICATION_ID = 4101
+        private const val CHANNEL_ID = "chabak_morning_alarm_v2"
+        internal const val NOTIFICATION_ID = 4101
+
+        private fun channel(context: Context): NotificationManager {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(NotificationChannel(
+                CHANNEL_ID, "CHABAK 스마트 모닝", NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "설정한 시각에 표시되는 기상 알림"
+                setSound(null, null)
+                enableVibration(false)
+            })
+            return manager
+        }
+
+        private fun openMorning(context: Context): PendingIntent = PendingIntent.getActivity(
+            context, 4103, Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                .putExtra("open_morning", true),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        @SuppressLint("MissingPermission")
+        fun showFallbackNotification(context: Context, test: Boolean) {
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                    PackageManager.PERMISSION_GRANTED) return
+            channel(context).notify(NOTIFICATION_ID, Notification.Builder(context, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                .setContentTitle(if (test) "CHABAK 시험 알람" else "CHABAK 스마트 모닝")
+                .setContentText("기상 시간이 됐어요. 소리 재생은 제한됐어요.")
+                .setCategory(Notification.CATEGORY_ALARM)
+                .setContentIntent(openMorning(context))
+                .setAutoCancel(true)
+                .build())
+        }
     }
     private val handler = Handler(Looper.getMainLooper())
     private var player: MediaPlayer? = null
@@ -2541,7 +2794,7 @@ class ChabakMorningPlaybackService : Service() {
             ACTION_STOP -> { stopAlarm(); return START_NOT_STICKY }
             ACTION_SNOOZE -> {
                 stopAlarm()
-                ChabakMorningScheduler.scheduleAt(this, System.currentTimeMillis() + 5 * 60_000L)
+                ChabakMorningScheduler.snooze(this)
                 return START_NOT_STICKY
             }
             ACTION_PLAY -> { testAlarm = intent?.getBooleanExtra("chabak_test_alarm", false) == true; startAlarm() }
@@ -2558,23 +2811,8 @@ class ChabakMorningPlaybackService : Service() {
         else -> R.raw.chabak_forest
     }
 
-    private fun createChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val channel = NotificationChannel(CHANNEL_ID, "CHABAK 스마트 모닝", NotificationManager.IMPORTANCE_HIGH).apply {
-            description = "설정한 시각에 울리는 자연음 알람"
-            setSound(null, null) // playback comes from MediaPlayer, not notification
-            enableVibration(false)
-        }
-        manager.createNotificationChannel(channel)
-    }
-
     private fun notification(): Notification {
-        val open = PendingIntent.getActivity(this, 4103,
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                putExtra("open_morning", true)
-            }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val open = openMorning(this)
         val snooze = PendingIntent.getService(this, 4104,
             Intent(this, ChabakMorningPlaybackService::class.java).setAction(ACTION_SNOOZE),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -2599,7 +2837,7 @@ class ChabakMorningPlaybackService : Service() {
     private fun startAlarm() {
         if (player != null) return
         try {
-            createChannel()
+            channel(this)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
             } else startForeground(NOTIFICATION_ID, notification())
@@ -2612,7 +2850,9 @@ class ChabakMorningPlaybackService : Service() {
                     if (event == AudioManager.AUDIOFOCUS_LOSS) handler.post { stopAlarm() }
                 }.build()
             if (audioManager?.requestAudioFocus(focus) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                stopAlarm(); return
+                stopAlarm()
+                showFallbackNotification(this, testAlarm)
+                return
             }
             request = focus
             // 오전 5~10시에는 자연음 고정. 그 외 시간은 사용자가 고른 로컬 음원 우선.
@@ -2635,11 +2875,13 @@ class ChabakMorningPlaybackService : Service() {
             player?.isLooping = true
             player?.setVolume(.12f, .12f)
             player?.start()
+            android.util.Log.i("ChabakMorning", "alarm_audio_started")
             fadeFrom = SystemClock.elapsedRealtime()
             handler.post(fadeRunnable)
             handler.postDelayed(stopRunnable, 5 * 60_000L)
         } catch (_: Exception) {
             stopAlarm()
+            showFallbackNotification(this, testAlarm)
         }
     }
 

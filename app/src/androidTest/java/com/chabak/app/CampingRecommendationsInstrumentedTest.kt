@@ -52,6 +52,18 @@ class CampingRecommendationsInstrumentedTest {
     }
 
     @Test
+    fun showerRequirementRejectsZeroAndUnknownCounts() {
+        val criteria = CampingCriteria("경기", shower = true)
+        val items = JSONArray()
+            .put(entry(camp("gocamping_1")))
+            .put(entry(camp("gocamping_2").put("showers", JSONObject.NULL)))
+            .put(entry(camp("gocamping_3").put("showers", 1)))
+        val response = JSONObject().put("source", GOCAMPING_SOURCE).put("items", items)
+        val result = GoCampingCatalog.decodeRecommendations(response, criteria).items
+        assertEquals(listOf("gocamping_3"), result.map { it.place.id })
+    }
+
+    @Test
     fun rejectsOtherSourcesAndSeparatesCampingPowerFromVehicleCharging() {
         try {
             GoCampingCatalog.decodeList(JSONObject().put("source", "fixture").put("items", JSONArray()))
@@ -89,6 +101,42 @@ class CampingRecommendationsInstrumentedTest {
 
         item.getJSONObject("permit").put("sourceUrl", "http://example.test/terms")
         assertTrue(ReviewedCampingSites.decode(root).isEmpty())
+    }
+
+    @Test
+    fun savesOfficialCoordinatesWithTheSelectedTripWithoutLosingOlderTrips() {
+        val point = TravelPoint(37.123456789012, 127.123456789012)
+        val item = camp("gocamping_10").put("mapX", point.longitude.toString()).put("mapY", point.latitude)
+        val response = JSONObject().put("source", GOCAMPING_SOURCE).put("items", JSONArray().put(entry(item)))
+        val place = GoCampingCatalog.decodeRecommendations(response, CampingCriteria("경기")).items.single().place
+        assertEquals(point, place.coordinates)
+        item.put("mapX", point.latitude).put("mapY", point.longitude)
+        assertNull(GoCampingCatalog.decodeRecommendations(response, CampingCriteria("경기")).items.single().place.coordinates)
+
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val database = "gocamping-coordinates-${UUID.randomUUID()}.db"
+        val legacy = Trip(UUID.randomUUID().toString(), place.copy(coordinates = null), today, people = 2, nights = 1, packedItemIds = setOf("mat"))
+        try {
+            val selectedId = TripStore(context, database).use { store ->
+                store.loadOrMigrate { legacy }
+                store.createTrip(legacy.tripId, place).activeTripId
+            }
+            TripStore(context, database).use { store ->
+                val restored = store.loadOrMigrate { error("Must restore the database") }
+                assertEquals(selectedId, restored.activeTripId)
+                assertEquals(point, restored.activeTrip.place.coordinates)
+                assertEquals(legacy, store.openTrip(legacy.tripId).activeTrip)
+                store.updateTrip(legacy.tripId) { it.copy(travel = it.travel.withCampsitePoint(point)) }
+            }
+            TripStore(context, database).use { store ->
+                val restored = store.loadOrMigrate { error("Must restore the database") }.activeTrip
+                assertEquals(legacy.tripId, restored.tripId)
+                assertEquals(point, restored.travel.campsitePoint)
+                assertEquals(legacy.packedItemIds, restored.packedItemIds)
+            }
+        } finally {
+            context.deleteDatabase(database)
+        }
     }
 
     @Test

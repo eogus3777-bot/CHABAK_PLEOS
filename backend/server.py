@@ -5,6 +5,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from urllib.error import HTTPError, URLError
@@ -73,6 +74,19 @@ def public_url(value):
     return ""
 
 
+def coordinate(value, minimum, maximum):
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        return None
+    raw = str(value).strip()
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?", raw):
+        return None
+    try:
+        number = Decimal(raw)
+    except InvalidOperation:
+        return None
+    return raw if number.is_finite() and minimum <= number <= maximum else None
+
+
 def normalize(row):
     content_id = str(row.get("contentId", "")).strip()
     name = text(row.get("facltNm"))
@@ -87,8 +101,12 @@ def normalize(row):
     for tag, aliases in TAGS.items():
         if any(alias in raw_tags for alias in aliases):
             tags[tag] = None
+    longitude = coordinate(row.get("mapX"), 123, 133)
+    latitude = coordinate(row.get("mapY"), 32, 40)
     return {
         "id": f"gocamping_{content_id}",
+        "mapX": longitude if latitude is not None else None,
+        "mapY": latitude if longitude is not None else None,
         "name": name,
         "region": region,
         "district": text(row.get("sigunguNm")),
@@ -128,7 +146,7 @@ def fetch_page(key, page):
     if payload.lstrip().startswith(b"<"):
         raise ProviderError("provider_rejected")
     try:
-        response = json.loads(payload)["response"]
+        response = json.loads(payload, parse_float=Decimal)["response"]
         if str(response["header"]["resultCode"]) not in ("00", "0000", "0"):
             raise ProviderError("provider_rejected")
         body = response["body"]
@@ -153,10 +171,13 @@ def collect(key):
         received += len(rows)
         if (not rows and (page > 1 or total > 0)) or (total == 0 and rows):
             raise ProviderError("incomplete_provider_response")
+        unique_before_page = len(camps)
         for row in rows:
             camp = normalize(row)
             if camp:
                 camps[camp["id"]] = camp
+        if page > 1 and len(camps) == unique_before_page:
+            raise ProviderError("incomplete_provider_response")
         if received >= total:
             if total and not camps:
                 raise ProviderError("invalid_provider_response")
@@ -191,6 +212,9 @@ def results(camps, params, recommend):
     if not re.fullmatch(r"[0-9]{1,9}", limit) or int(limit) == 0:
         raise ValueError("invalid_limit")
     limit = min(int(limit), maximum)
+    campsite_id = param("id")
+    if campsite_id and not re.fullmatch(r"gocamping_[0-9]+", campsite_id):
+        raise ValueError("invalid_id")
     region = param("region")
     district = param("district").casefold()
     nature = param("nature")
@@ -205,6 +229,8 @@ def results(camps, params, recommend):
 
     matches = []
     for camp in camps:
+        if campsite_id and camp["id"] != campsite_id:
+            continue
         if region not in ("", "전국", camp["region"]):
             continue
         if district and district not in f'{camp["district"]} {camp["address"]}'.casefold():

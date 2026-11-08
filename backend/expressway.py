@@ -142,8 +142,11 @@ def find_rest_area(code, road_number, direction):
         return None
     try:
         area["foods"] = representative_food(foods_by_code(), code)
-    except ProviderError:
+        area["foodStatus"] = "available" if area["foods"] else "empty"
+    except ProviderError as error:
         area["foods"] = []
+        area["foodStatus"] = "error"
+        area["foodError"] = error.diagnostic()
     area["collectedAtMillis"] = int(time.time() * 1000)
     return area
 

@@ -3,6 +3,9 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="pleos.car.permission.NAVI_ROUTE"/>
     <uses-permission android:name="pleos.car.permission.NAVI_ROUTE_SEARCH"/>
+    <uses-permission android:name="pleos.car.permission.CAR_ENERGY"/>
+    <uses-permission android:name="pleos.car.permission.CAR_INFO"/>
+    <uses-permission android:name="pleos.car.permission.CAR_LIGHTS"/>
     <!--  스마트 모닝: 알람 / 알림 / 백그라운드 자연음  -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
@@ -10,7 +13,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
-    <application android:allowBackup="true" android:label="CHABAK" android:supportsRtl="true" android:usesCleartextTraffic="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+    <application android:allowBackup="false" android:label="CHABAK" android:supportsRtl="true" android:networkSecurityConfig="@xml/chabak_network_security" android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <!--  현재 Pleos에서 실행 중인 Compose 시작 화면  -->
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
             <intent-filter>
@@ -19,6 +22,8 @@
             </intent-filter>
             <intent-filter>
                 <action android:name="SEARCH_CAMPING_PLACE"/>
+                <action android:name="SEARCH_TRIP_PLACES"/>
+                <action android:name="MANAGE_CAMPING_TRIP"/>
                 <category android:name="android.intent.category.DEFAULT"/>
             </intent-filter>
         </activity>

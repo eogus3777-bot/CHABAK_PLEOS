@@ -20,9 +20,9 @@ class TripEnergyPlanTest {
     @Test
     fun doesNotInventBatteryEstimatesWhenMeasurementsAreMissing() {
         val plan = TripEnergyPlan(6, 40, 2.0)
-        assertEquals(StayEnergyEstimate(12.0), plan.estimate(null, 72.0))
-        assertEquals(StayEnergyEstimate(12.0), plan.estimate(75, null))
-        assertEquals(StayEnergyEstimate(12.0), plan.estimate(75, Double.NaN))
+        assertNull(plan.estimate(null, 72.0))
+        assertNull(plan.estimate(75, null))
+        assertNull(plan.estimate(75, Double.NaN))
         assertNull(TripEnergyPlan().estimate(75, 72.0))
     }
 
@@ -36,6 +36,16 @@ class TripEnergyPlanTest {
     }
 
     @Test
+    fun calculatesOnlyThePercentAboveTheReserveWithoutCapacityOrPower() {
+        val plan = TripEnergyPlan(minimumPercent = 30)
+        assertEquals(45, plan.availablePercent(75))
+        assertEquals(0, plan.availablePercent(30))
+        assertEquals(0, plan.availablePercent(0))
+        assertNull(plan.availablePercent(null))
+        assertNull(plan.availablePercent(101))
+    }
+
+    @Test
     fun warnsAtAndBelowTheSavedMinimumOnlyForValidSoc() {
         val plan = TripEnergyPlan(minimumPercent = 35)
         assertTrue(plan.warnsAt(35))
@@ -43,5 +53,14 @@ class TripEnergyPlanTest {
         assertFalse(plan.warnsAt(36))
         assertFalse(plan.warnsAt(null))
         assertFalse(plan.warnsAt(-1))
+    }
+
+    @Test
+    fun handlesBatteryEndpointsAndRejectsImpossibleValues() {
+        val plan = TripEnergyPlan(minimumPercent = 30)
+        assertEquals(0, plan.availablePercent(0))
+        assertEquals(70, plan.availablePercent(100))
+        assertNull(plan.availablePercent(-1))
+        assertNull(plan.availablePercent(101))
     }
 }

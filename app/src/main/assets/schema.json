@@ -1,6 +1,6 @@
 {
   "packageName": "com.chabak.app",
-  "appDescription": "CHABAK helps travelers find registered campsites for vehicle-based stays.",
+  "appDescription": "CHABAK connects campsite discovery, travel places, parked camping stays and vehicle battery readings.",
   "version": "1.0",
   "invokeWord": "차박",
   "actionCalls": [
@@ -59,6 +59,63 @@
           ]
         },
         "component": "activity"
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "SEARCH_TRIP_PLACES",
+        "description": "Searches verified rest areas, breweries or periodic markets associated with the selected camping trip.",
+        "component": "activity",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "description": "The type of trip place to search.",
+              "enum": [
+                "REST_AREA",
+                "BREWERY",
+                "MARKET"
+              ]
+            },
+            "date": {
+              "type": "string",
+              "description": "An optional calendar date in YYYY-MM-DD format, used without the weekend option."
+            },
+            "weekend": {
+              "type": "boolean",
+              "description": "Whether to search the current or upcoming weekend instead of the trip date."
+            }
+          },
+          "required": [
+            "category"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "MANAGE_CAMPING_TRIP",
+        "description": "Starts a parked camping stay or retrieves the current battery reading for the selected trip.",
+        "component": "activity",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "description": "The camping operation to perform.",
+              "enum": [
+                "START_STAY",
+                "READ_ENERGY"
+              ]
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        }
       }
     }
   ]

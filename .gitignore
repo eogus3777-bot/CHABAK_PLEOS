@@ -32,3 +32,33 @@ local.properties
 *.sqlite*
 __pycache__/
 *.py[cod]
+
+# Generated deliveries and local QA evidence (may contain trip details)
+/outputs/
+/work/
+
+# Generated Android/Gradle artifacts; keep Gradle scripts and wrapper sources
+**/build/
+*.apk
+*.apks
+*.aab
+*.hprof
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+Thumbs.db
+Desktop.ini
+
+# Private signing, service-account and local credential files
+*.pfx
+*.p8
+*.key
+key.properties
+keystore.properties
+signing.properties
+secrets.properties
+credentials.json
+service-account*.json
+*-credentials.json
