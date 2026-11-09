@@ -33,10 +33,13 @@ import java.net.URL
 import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.suspendCancellableCoroutine
+import androidx.lifecycle.ViewModelProvider
+import kotlin.coroutines.resume
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
@@ -118,7 +121,7 @@ private fun isMorningTime(): Boolean = chabakNow().hour in 5..10
 class MainActivity : ComponentActivity() {
     // 알람 알림을 누르고 이미 실행 중인 앱으로 돌아왔을 때도 화면 변경 이벤트를 전달합니다.
     private var newAlarmIntentSerial by mutableIntStateOf(0)
-    private val gleoIntents = Channel<Intent>(Channel.UNLIMITED)
+    private val gleoModel by lazy { ViewModelProvider(this)[GleoCommandModel::class.java] }
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) ScenicBitmapCache.clear()
@@ -126,17 +129,18 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if ((intent.action == GleoCampingAction.ACTION || intent.action in GleoTripAction.actions)) gleoIntents.trySend(intent)
+        if (intent.action in GleoContract.actions) gleoModel.session.submit(intent)
         else newAlarmIntentSerial++
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (savedInstanceState == null && (intent.action == GleoCampingAction.ACTION || intent.action in GleoTripAction.actions)) {
-            gleoIntents.trySend(intent)
+        if (!gleoModel.initialIntentReceived) {
+            gleoModel.initialIntentReceived = true
+            if (savedInstanceState == null) gleoModel.session.submit(intent)
         }
         window.statusBarColor = android.graphics.Color.rgb(6, 23, 34)
         window.navigationBarColor = android.graphics.Color.rgb(6, 23, 34)
-        setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Mint, onPrimary = Midnight)) { Chabak3App(newAlarmIntentSerial, gleoIntents) } }
+        setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Mint, onPrimary = Midnight)) { Chabak3App(newAlarmIntentSerial, gleoModel.session) } }
     }
 }
 
@@ -824,7 +828,7 @@ private class NatureAudioEngine(
 }
 
 @Composable
-private fun Chabak3App(alarmIntentSerial: Int, gleoIntents: Channel<Intent>) {
+private fun Chabak3App(alarmIntentSerial: Int, gleoSession: GleoCommandSession) {
     val context = LocalContext.current
     val s = remember { AppState(context) }
     val vehicleEnergy = rememberVehicleEnergy(s.page == "energy" || s.page == "stay")
@@ -923,22 +927,30 @@ private fun Chabak3App(alarmIntentSerial: Int, gleoIntents: Channel<Intent>) {
         s.navigate("stay")
         return "STARTED"
     }
-    LaunchedEffect(gleoIntents) {
-        for (intent in gleoIntents) {
+    LaunchedEffect(gleoSession) {
+        gleoSession.requests.collectLatest { request ->
+            if (request == null || !gleoSession.canExecute(request)) return@collectLatest
+            val intent = request.intent
+            val reply: (GleoResponse) -> Unit = { gleoSession.complete(request, it) }
             if (intent.action == GleoCampingAction.ACTION) {
-                GleoCampingAction.handle(context.applicationContext, intent, s::searchFromGleo)
+                suspendCancellableCoroutine<Unit> { continuation ->
+                    GleoCampingAction.handle(context.applicationContext, intent, reply = {
+                        if (continuation.isActive) {
+                            reply(it)
+                            continuation.resume(Unit)
+                        }
+                    }, search = s::searchFromGleo)
+                }
             } else {
                 GleoTripAction.handle(context.applicationContext, intent, s.activeTrip.visitDate, chabakNow().toLocalDate(),
                     search = s::searchNearby, start = ::startSelectedStay,
                     energy = {
                         s.navigate("energy")
-                        kotlinx.coroutines.withTimeoutOrNull(10_000L) {
-                            snapshotFlow { latestEnergy.value }.first {
-                                val missing = it.soc as? EnergyRead.Missing
-                                missing == null || missing.issue !in setOf(EnergyIssue.INACTIVE, EnergyIssue.LOADING)
-                            }
-                        } ?: VehicleEnergy(soc = EnergyRead.Missing(EnergyIssue.CONNECTION))
-                    })
+                        snapshotFlow { latestEnergy.value }.first {
+                            val missing = it.soc as? EnergyRead.Missing
+                            missing == null || missing.issue !in setOf(EnergyIssue.INACTIVE, EnergyIssue.LOADING)
+                        }
+                    }, reply = reply)
             }
         }
     }

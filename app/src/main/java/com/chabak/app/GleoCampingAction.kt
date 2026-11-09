@@ -26,15 +26,25 @@ internal object GleoCampingAction {
     fun handle(
         context: Context,
         intent: Intent,
+        reply: (GleoResponse) -> Unit = { GleoContract.reply(context, ACTION, it) },
         search: (Query, (Outcome, List<String>) -> Unit) -> Unit
     ) {
         if (intent.action != ACTION) return
+        val delivered = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun respond(status: String, message: String, reason: String, places: List<String> = emptyList()) {
+            if (!delivered.compareAndSet(false, true)) return
+            val details = JSONObject()
+            if (reason in setOf("FOUND", "NO_RESULTS")) {
+                details.put("resultCount", places.size).put("placeNames", JSONArray(places.take(3)))
+            }
+            reply(GleoResponse(status, message, reason, details))
+        }
 
         val query = try {
             val parameters = parameters(intent)
             val region = parameters.readText("region")
             if (region.isEmpty()) {
-                respond(context, "asking", "A region is required to search for campsites.", "MISSING_REGION")
+                respond("asking", "A region is required to search for campsites.", "MISSING_REGION")
                 return
             }
             require(region in regions)
@@ -49,19 +59,23 @@ internal object GleoCampingAction {
                 parameters.readFlag("store")
             )
         } catch (_: Exception) {
-            respond(context, "fail", "The campsite search parameters are invalid.", "INVALID_PARAMETERS")
+            respond("fail", "The campsite search parameters are invalid.", "INVALID_PARAMETERS")
             return
         }
 
-        search(query) { outcome, places ->
-            when (outcome) {
-                Outcome.FOUND -> respond(
-                    context, "success", "Matching registered campsites are shown in CHABAK.", "FOUND", places
-                )
-                Outcome.NO_RESULTS -> respond(context, "fail", "No registered campsites match the requested criteria.", "NO_RESULTS")
-                Outcome.SERVICE_FAILURE -> respond(context, "fail", "The campsite recommendation service is unavailable.", "SERVICE_FAILURE")
-                Outcome.SUPERSEDED -> respond(context, "fail", "A newer campsite search replaced this request.", "SUPERSEDED")
+        try {
+            search(query) { outcome, places ->
+                when (outcome) {
+                    Outcome.FOUND -> respond(
+                        "success", "Matching registered campsites are shown in CHABAK.", "FOUND", places
+                    )
+                    Outcome.NO_RESULTS -> respond("success", "The search completed, but no registered campsites match the requested criteria.", "NO_RESULTS")
+                    Outcome.SERVICE_FAILURE -> respond("fail", "The campsite recommendation service is unavailable.", "SERVICE_FAILURE")
+                    Outcome.SUPERSEDED -> respond("fail", "A newer campsite search replaced this request.", "SUPERSEDED")
+                }
             }
+        } catch (_: Exception) {
+            respond("fail", "The campsite recommendation service is unavailable.", "SERVICE_FAILURE")
         }
     }
 
@@ -70,15 +84,4 @@ internal object GleoCampingAction {
 
     private fun JSONObject.readText(name: String): String = GleoContract.text(this, name)
     private fun JSONObject.readFlag(name: String): Boolean = GleoContract.flag(this, name)
-
-    private fun respond(
-        context: Context, status: String, message: String, reason: String,
-        places: List<String> = emptyList()
-    ) {
-        val details = JSONObject()
-        if (places.isNotEmpty()) {
-            details.put("resultCount", places.size).put("placeNames", JSONArray(places.take(3)))
-        }
-        GleoContract.reply(context, ACTION, status, message, reason, details)
-    }
 }

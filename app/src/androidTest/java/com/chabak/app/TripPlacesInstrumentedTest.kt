@@ -71,8 +71,8 @@ class TripPlacesInstrumentedTest {
         assertEquals("asking", replies.last().getString("status"))
         handle(replies, Intent(GleoTripAction.SEARCH).putExtra("category", "MARKET").putExtra("date", "2026-02-30"))
         assertEquals("INVALID_PARAMETERS", reason(replies.last()))
-        for ((status, expected) in listOf(NearbyStatus.NO_RESULTS to "fail", NearbyStatus.UNVERIFIED_ROUTE to "fail",
-            NearbyStatus.NO_COORDINATES to "asking", NearbyStatus.SERVICE_FAILURE to "error", NearbyStatus.SUPERSEDED to "fail")) {
+        for ((status, expected) in listOf(NearbyStatus.NO_RESULTS to "success", NearbyStatus.UNVERIFIED_ROUTE to "fail",
+            NearbyStatus.NO_COORDINATES to "asking", NearbyStatus.SERVICE_FAILURE to "fail", NearbyStatus.SUPERSEDED to "fail")) {
             handle(replies, Intent(GleoTripAction.SEARCH).putExtra("category", "MARKET"), status)
             assertEquals(expected, replies.last().getString("status"))
             assertEquals(status.name, reason(replies.last()))
@@ -86,13 +86,18 @@ class TripPlacesInstrumentedTest {
             assertEquals("fail", replies.last().getString("status"))
             assertEquals(blocked, reason(replies.last()))
         }
-        for (issue in listOf(EnergyIssue.PERMISSION, EnergyIssue.UNSUPPORTED, EnergyIssue.CONNECTION, EnergyIssue.UNAVAILABLE)) {
+        for (issue in listOf(EnergyIssue.PERMISSION, EnergyIssue.UNSUPPORTED, EnergyIssue.CONNECTION, EnergyIssue.UNAVAILABLE, EnergyIssue.RESTRICTED)) {
             handle(replies, Intent(GleoTripAction.MANAGE).putExtra("operation", "READ_ENERGY"),
                 energy = { VehicleEnergy(soc = EnergyRead.Missing(issue)) })
             val reply = replies.last()
             assertEquals("fail", reply.getString("status"))
             assertEquals(issue.name, reason(reply))
             assertFalse(JSONArray(reply.getString("data")).getJSONObject(0).has("stateOfChargePercent"))
+        }
+        for (invalid in listOf(-1, 101)) {
+            handle(replies, Intent(GleoTripAction.MANAGE).putExtra("operation", "READ_ENERGY"),
+                energy = { VehicleEnergy(soc = EnergyRead.Value(invalid)) })
+            assertEquals("fail", replies.last().getString("status"))
         }
     }
 
@@ -103,9 +108,27 @@ class TripPlacesInstrumentedTest {
         assertFalse(JSONArray(replies.last().getString("data")).getJSONObject(0).getBoolean("openingConfirmed"))
         handle(replies, Intent(GleoTripAction.MANAGE).putExtra("operation", "START_STAY"), start = { "STARTED" })
         assertEquals("success", replies.last().getString("status"))
+        assertFalse(JSONArray(replies.last().getString("data")).getJSONObject(0).getBoolean("vehicleControlPerformed"))
+        handle(replies, Intent(GleoTripAction.MANAGE).putExtra("operation", "START_STAY"), start = { "ALREADY_STARTED" })
+        assertEquals("ALREADY_STARTED", reason(replies.last()))
         handle(replies, Intent(GleoTripAction.MANAGE).putExtra("operation", "READ_ENERGY"),
             energy = { VehicleEnergy(soc = EnergyRead.Value(63)) })
         assertEquals(63, JSONArray(replies.last().getString("data")).getJSONObject(0).getInt("stateOfChargePercent"))
+    }
+
+    @Test fun serviceExceptionsReturnOfficialFailAndDateFlagsReachTheSearch() = runBlocking {
+        val replies = Replies(context)
+        val intent = Intent(GleoTripAction.SEARCH).putExtra("category", "MARKET").putExtra("weekend", true)
+        GleoTripAction.handle(replies, intent, today.minusDays(1), today,
+            search = {
+                assertEquals(MarketCalendar.thisWeekend(today), it.window)
+                assertTrue(it.strictDates)
+                throw IllegalStateException("isolated service failure")
+            }, start = { error("Unexpected start") }, energy = { error("Unexpected read") })
+        assertEquals("fail", replies.last().getString("status"))
+        assertEquals("SERVICE_FAILURE", reason(replies.last()))
+        handle(replies, intent.putExtra("date", "2026-11-09"))
+        assertEquals("INVALID_PARAMETERS", reason(replies.last()))
     }
 
     @Test fun legacyCampingSearchRetainsItsArgumentsAndCallbackContract() {

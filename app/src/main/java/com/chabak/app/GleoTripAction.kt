@@ -32,7 +32,8 @@ internal object GleoTripAction {
         context: Context, intent: Intent, tripDate: LocalDate, today: LocalDate,
         search: suspend (NearbyQuery) -> NearbyResult,
         start: () -> String,
-        energy: suspend () -> VehicleEnergy
+        energy: suspend () -> VehicleEnergy,
+        reply: (GleoResponse) -> Unit = { GleoContract.reply(context, intent.action!!, it) }
     ) {
         val action = intent.action ?: return
         if (action !in actions) return
@@ -41,17 +42,16 @@ internal object GleoTripAction {
             when (action) {
                 SEARCH -> {
                     if (GleoContract.text(params, "category").isBlank()) {
-                        GleoContract.reply(context, action, "asking", "A place category is required.", "MISSING_CATEGORY")
+                        reply(GleoResponse("asking", "A place category is required.", "MISSING_CATEGORY"))
                         return
                     }
                     val request = query(params, tripDate, today)
                     val result = search(request)
-                    val success = result.status == NearbyStatus.FOUND
                     val matchedDates = result.items.any { it.matchesDates }
                     val status = when (result.status) {
-                        NearbyStatus.FOUND -> "success"
+                        NearbyStatus.FOUND, NearbyStatus.NO_RESULTS -> "success"
                         NearbyStatus.NO_COORDINATES -> "asking"
-                        NearbyStatus.SERVICE_FAILURE -> "error"
+                        NearbyStatus.SERVICE_FAILURE -> "fail"
                         else -> "fail"
                     }
                     val message = when (result.status) {
@@ -68,43 +68,50 @@ internal object GleoTripAction {
                         .put("placeNames", JSONArray(result.items.map { it.place.name }.take(3)))
                         .put("dateStart", request.window.start.toString()).put("dateEnd", request.window.end.toString())
                         .put("openingConfirmed", false).put("registeredDateMatch", matchedDates)
-                    GleoContract.reply(context, action, status, message,
-                        if (success) "FOUND" else result.status.name, details)
+                    reply(GleoResponse(status, message, result.status.name, details))
                 }
                 MANAGE -> when (GleoContract.text(params, "operation")) {
                     "START_STAY" -> {
                         val reason = start()
                         val success = reason == "STARTED" || reason == "ALREADY_STARTED"
-                        GleoContract.reply(context, action, if (success) "success" else "fail",
-                            if (success) "The camping stay is active for the selected trip."
-                            else "The stay cannot start until the trip and parked interaction state are verified.", reason)
+                        val message = when (reason) {
+                            "STARTED", "ALREADY_STARTED" -> "The CHABAK camping stay is active; no vehicle controls were changed."
+                            "VEHICLE_RESTRICTED" -> "The stay cannot start until parked interaction is permitted."
+                            "TRIP_ARCHIVED" -> "An archived trip cannot be started."
+                            "ANOTHER_TRIP_ACTIVE" -> "Another camping stay is already active."
+                            "STORAGE_FAILURE" -> "CHABAK could not save the camping stay."
+                            else -> "The camping stay could not be started."
+                        }
+                        reply(GleoResponse(if (success) "success" else "fail", message, reason,
+                            JSONObject().put("operation", "START_STAY").put("vehicleControlPerformed", false)))
                     }
                     "READ_ENERGY" -> {
                         val reading = energy()
-                        val soc = reading.soc.valueOrNull()
+                        val soc = reading.soc.valueOrNull()?.takeIf { it in 0..100 }
                         val issue = (reading.soc as? EnergyRead.Missing)?.issue?.name ?: "UNAVAILABLE"
                         val emulator = android.os.Build.HARDWARE in setOf("ranchu", "goldfish")
                         val details = JSONObject().put("source", "Pleos Vehicle SDK")
                             .put("environment", if (emulator) "pleos_emulator" else "vehicle_sdk")
+                            .put("operation", "READ_ENERGY").put("vehicleControlPerformed", false)
                         if (soc != null) details.put("stateOfChargePercent", soc)
-                        GleoContract.reply(context, action, if (soc != null) "success" else "fail",
+                        reply(GleoResponse(if (soc != null) "success" else "fail",
                             if (soc != null && emulator) "The Pleos emulator Vehicle SDK reports an emulated battery charge."
                             else if (soc != null) "The Vehicle SDK reports the current battery charge."
                             else "The Vehicle SDK battery reading is unavailable.",
-                            if (soc != null) "ENERGY_READ" else issue, details)
+                            if (soc != null) "ENERGY_READ" else issue, details))
                     }
-                    "" -> GleoContract.reply(context, action, "asking", "An operation is required.", "MISSING_OPERATION")
+                    "" -> reply(GleoResponse("asking", "An operation is required.", "MISSING_OPERATION"))
                     else -> throw IllegalArgumentException("Unknown operation")
                 }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: IllegalArgumentException) {
-            GleoContract.reply(context, action, "fail", "The action parameters are invalid.", "INVALID_PARAMETERS")
+            reply(GleoResponse("fail", "The action parameters are invalid.", "INVALID_PARAMETERS"))
         } catch (_: org.json.JSONException) {
-            GleoContract.reply(context, action, "fail", "The action parameters are invalid.", "INVALID_PARAMETERS")
+            reply(GleoResponse("fail", "The action parameters are invalid.", "INVALID_PARAMETERS"))
         } catch (_: Exception) {
-            GleoContract.reply(context, action, "error", "The requested operation could not complete.", "SERVICE_FAILURE")
+            reply(GleoResponse("fail", "The requested operation could not complete.", "SERVICE_FAILURE"))
         }
     }
 }

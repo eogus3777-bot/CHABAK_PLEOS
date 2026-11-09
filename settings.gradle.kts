@@ -32,4 +32,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "CHABAK"
 include(":app")
- 
