@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -12,6 +13,35 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class TripEnergyInstrumentedTest {
+    @Test
+    fun restoresIndependentWakeTimesAndExistingTripData() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val database = "morning-${UUID.randomUUID()}.db"
+        val first = Trip(
+            UUID.randomUUID().toString(),
+            Place("morning_test", "Test", "경기", "", R.drawable.chabak_day_photo, "숲", ""),
+            LocalDate.of(2026, 11, 8), 2, 1,
+            packedItemIds = setOf("mat"), energyPlan = TripEnergyPlan(minimumPercent = 35),
+            wakeMinuteOfDay = 6 * 60 + 5
+        )
+        try {
+            val secondId = TripStore(context, database).use { store ->
+                store.loadOrMigrate { first }
+                val second = store.createTrip(first.tripId).activeTrip
+                assertNull(second.wakeMinuteOfDay)
+                store.updateTrip(second.tripId) { it.copy(wakeMinuteOfDay = 7 * 60 + 40) }
+                second.tripId
+            }
+            TripStore(context, database).use { store ->
+                assertEquals(460, store.loadOrMigrate { error("Must restore trips") }.activeTrip.wakeMinuteOfDay)
+                assertEquals(first, store.openTrip(first.tripId).activeTrip)
+                assertEquals(460, store.openTrip(secondId).activeTrip.wakeMinuteOfDay)
+            }
+        } finally {
+            context.deleteDatabase(database)
+        }
+    }
+
     private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
     private val start = TravelPoint(37.51, 127.04)
     private val camp = TravelPoint(37.47, 127.57)
@@ -75,6 +105,7 @@ class TripEnergyInstrumentedTest {
                 assertEquals(trip.travel, migrated.travel)
                 assertEquals(setOf("mat"), migrated.packedItemIds)
                 assertEquals(TripEnergyPlan(), migrated.energyPlan)
+                assertEquals(TripDiary(), migrated.diary)
             }
         } finally {
             context.deleteDatabase(database)

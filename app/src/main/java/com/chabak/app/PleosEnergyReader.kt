@@ -9,6 +9,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.RemoteException
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -42,7 +43,8 @@ internal sealed interface EnergyRead<out T> {
 internal data class VehicleEnergy(
     val soc: EnergyRead<Int> = EnergyRead.Missing(EnergyIssue.INACTIVE),
     val capacityKwh: EnergyRead<Double> = EnergyRead.Missing(EnergyIssue.INACTIVE),
-    val chargeSwitch: EnergyRead<Boolean> = EnergyRead.Missing(EnergyIssue.INACTIVE)
+    val chargeSwitch: EnergyRead<Boolean> = EnergyRead.Missing(EnergyIssue.INACTIVE),
+    val socReadAtElapsedMs: Long = 0L
 )
 
 internal class PleosEnergyReader(private val context: Context) {
@@ -80,7 +82,8 @@ internal class PleosEnergyReader(private val context: Context) {
                 if (canReadEnergy) {
                     launch {
                         watchSoc(battery) {
-                            readings = readings.copy(soc = it)
+                            readings = readings.copy(soc = it,
+                                socReadAtElapsedMs = if (it is EnergyRead.Value) SystemClock.elapsedRealtime() else 0L)
                             publish(readings)
                         }
                     }

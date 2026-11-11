@@ -22,6 +22,24 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(AndroidJUnit4::class)
 class EnergyConnectionFailureLabTest {
+
+    @Test
+    fun reportsDeniedPermissionsWithoutBindingVehicleService() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        assumeTrue(context.packageManager.hasSystemFeature(PackageManager.FEATURE_AUTOMOTIVE))
+        val deniedContext = object : ContextWrapper(context) {
+            override fun getApplicationContext(): Context = this
+            override fun checkSelfPermission(permission: String): Int = PackageManager.PERMISSION_DENIED
+
+            override fun bindService(service: Intent, conn: ServiceConnection, flags: Int): Boolean =
+                error("A denied SDK read must not bind Vehicle Service")
+        }
+        val readings = mutableListOf<VehicleEnergy>()
+        PleosEnergyReader(deniedContext).monitor(readings::add)
+        val denied = EnergyRead.Missing(EnergyIssue.PERMISSION)
+        assertEquals(listOf(VehicleEnergy(denied, denied, denied)), readings)
+    }
+
     @Test
     fun reportsBindingFailureWithoutStoppingTheSystemVehicleService() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

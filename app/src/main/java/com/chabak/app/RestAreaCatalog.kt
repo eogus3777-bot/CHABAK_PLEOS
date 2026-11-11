@@ -17,6 +17,24 @@ internal object RestAreaCatalog {
         }
     }
 
+    fun healthLabel(): String {
+        val connection = URL("http://10.0.2.2:8086/health").openConnection() as HttpURLConnection
+        return try {
+            connection.connectTimeout = 1500
+            connection.readTimeout = 1500
+            if (connection.responseCode != 200) return "휴게소 서버 응답 확인 필요"
+            val json = JSONObject(connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
+            if (json.optString("source") != "한국도로공사") return "휴게소 출처 확인 필요"
+            val info = if (json.optBoolean("infoConfigured")) "인증 설정됨" else "인증키 설정 필요"
+            val food = if (json.optBoolean("foodConfigured")) "인증 설정됨" else "인증키 설정 필요"
+            "도로공사 INFO $info · FOOD $food"
+        } catch (_: Exception) {
+            "휴게소 서버 연결 확인 필요"
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun lookup(key: RestAreaKey): RestArea? {
         val query = mapOf("code" to key.code, "roadNumber" to key.roadNumber, "direction" to key.direction)
             .entries.joinToString("&") { "${it.key}=${URLEncoder.encode(it.value, "UTF-8")}" }

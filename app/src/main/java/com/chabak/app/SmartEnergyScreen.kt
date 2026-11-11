@@ -101,7 +101,9 @@ internal fun SmartEnergyScreen(trip: Trip, readings: VehicleEnergy, save: (Strin
 
     val soc = if (simulated) simulatedSoc else readings.soc.valueOrNull()
     val capacity = if (simulated) 72.0 else readings.capacityKwh.valueOrNull()
-    val estimate = plan.estimate(soc, capacity)
+    // Vehicle SDK does not provide measured overnight load for this plan.
+    val estimate = if (simulated) plan.estimate(soc, capacity) else null
+    val available = plan.availablePercent(soc)
     val source = when {
         simulated -> "앱 시뮬레이션 · 가정값"
         android.os.Build.HARDWARE in setOf("ranchu", "goldfish") -> "Pleos Vehicle SDK · 에뮬레이터"
@@ -109,7 +111,7 @@ internal fun SmartEnergyScreen(trip: Trip, readings: VehicleEnergy, save: (Strin
     }
 
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        GlassPanel(Modifier.fillMaxWidth(if (maxWidth >= 760.dp) 0.55f else 1f).heightIn(max = maxHeight)) {
+        GlassPanel(Modifier.fillMaxWidth(if (maxWidth >= 760.dp) 0.82f else 1f).heightIn(max = maxHeight)) {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 SectionTitle("스마트 에너지", trip.place.name)
                 Text(source, color = Gold, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
@@ -117,30 +119,31 @@ internal fun SmartEnergyScreen(trip: Trip, readings: VehicleEnergy, save: (Strin
                     "배터리 잔량 · ${soc?.let { "$it%" } ?: readings.soc.missingLabel()}",
                     color = Color.White, fontSize = 31.sp, fontWeight = FontWeight.Bold
                 )
+                BatteryDial(soc, simulated)
                 EnergyWarning(plan, soc, simulated)
                 EnergyLine("배터리 용량 · ${capacity?.let { "${decimal(it)} kWh (${if (simulated) "가정" else "공칭"})" } ?: readings.capacityKwh.missingLabel()}")
                 if (!simulated) {
-                    EnergyLine("주행 가능 거리 · 미지원")
-                    EnergyLine("충전 중 여부 · 미지원")
+                    EnergyLine("주행 거리·충전 중 여부 · 미지원")
                     EnergyLine("충전 스위치 · ${readings.chargeSwitch.valueOrNull()?.let { if (it) "켜짐" else "꺼짐" } ?: readings.chargeSwitch.missingLabel()}")
                 }
                 Text(
-                    "숙박 ${plan.overnightHours}시간 · 최소 잔량 ${plan.minimumPercent}%",
+                    "숙박 ${plan.overnightHours}시간 · 귀가용 보호 기준 ${plan.minimumPercent}%",
                     color = Gold, fontSize = 23.sp, fontWeight = FontWeight.Bold
                 )
-                val expected = estimate?.let { "${decimal(it.useKwh)} kWh (추정)" } ?: "소비전력 입력 필요"
-                EnergyLine("예상 숙박 소비량 · $expected")
-                EnergyLine("예상 종료 잔량 · ${estimate?.endPercent?.let { "${decimal(it)}%" } ?: "계산 조건 확인 필요"}")
-                estimate?.minimumMarginKwh?.let { margin ->
+                EnergyLine("차박용 사용 가능 비율 · ${available?.let { "$it%p" } ?: "확인 필요"}")
+                if (estimate != null) {
+                    EnergyLine("가상 숙박 소비량 · ${decimal(estimate.useKwh)} kWh")
+                    EnergyLine("가상 숙박 종료 잔량 · ${decimal(estimate.endPercent)}%")
+                    val margin = estimate.minimumMarginKwh
                     val label = if (margin >= 0) "여유" else "부족"
-                    EnergyLine("최소 잔량 대비 예상 $label · ${decimal(abs(margin))} kWh")
+                    EnergyLine("보호 기준 대비 가상 $label · ${decimal(abs(margin))} kWh")
+                    EnergyLine("보호 기준까지 가상 사용 시간 · ${estimate.hoursUntilMinimum?.let { "${decimal(it)}시간" } ?: "계산 불가"}")
+                } else {
+                    EnergyLine(if (simulated) "가상 계산 · 추정 소비전력 입력 필요"
+                        else "숙박 소비량·사용 시간 · 계산 불가 (측정 소비전력 미확인)")
                 }
-                estimate?.hoursUntilMinimum?.let {
-                    EnergyLine("최소 잔량까지 예상 · ${decimal(it)}시간")
-                }
-                EnergyLine("귀가 필요 에너지 · 미확인")
-                EnergyLine("입력한 소비전력은 추정치예요. 예상 잔량과 시간은 실제 사용을 보장하지 않아요.")
-                EnergyLine("잔량 경고는 차박 중·에너지 화면이 보일 때 확인할 수 있어요. 백그라운드에서는 알림을 보장하지 않아요.")
+                EnergyLine("실제 귀가 필요 에너지 · 확인 필요")
+                EnergyLine("잔량 경고 · 앱 화면에서 확인 (백그라운드 알림 미보장)")
                 if (editable) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                         ActionButton(if (settingsOpen) "설정 닫기" else "계획 설정", Modifier.weight(1f), filled = false) {
@@ -167,8 +170,8 @@ internal fun SmartEnergyScreen(trip: Trip, readings: VehicleEnergy, save: (Strin
                             }
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                            EnergyInput("최소 잔량 (%)", minimum, Modifier.weight(1f), KeyboardType.Number) { minimum = it }
-                            EnergyInput("추정 소비전력 (kW)", power, Modifier.weight(1f), KeyboardType.Decimal) { power = it }
+                            EnergyInput("귀가용 보호 기준 (%)", minimum, Modifier.weight(1f), KeyboardType.Number) { minimum = it }
+                            EnergyInput("시뮬레이션 전력 (kW)", power, Modifier.weight(1f), KeyboardType.Decimal) { power = it }
                         }
                         ActionButton("에너지 계획 저장", Modifier.fillMaxWidth()) {
                             if (gate.current() == TravelInteraction.ALLOWED) {
@@ -186,7 +189,7 @@ internal fun SmartEnergyScreen(trip: Trip, readings: VehicleEnergy, save: (Strin
                             }
                         }
                     }
-                    if (feedback.isNotBlank()) Text(feedback, color = Gold, fontSize = 20.sp)
+                    if (feedback.isNotBlank()) Text(feedback, color = Gold, fontSize = 24.sp)
                 } else {
                     EnergyLine(if (interaction == TravelInteraction.RESTRICTED) "주행 중에는 에너지 정보를 읽을 수 있어요."
                         else "입력 허용 상태를 확인 중이에요.")
@@ -209,7 +212,7 @@ internal fun EnergyWarning(plan: TripEnergyPlan, soc: Int?, simulated: Boolean =
 
 @Composable
 private fun EnergyLine(text: String) {
-    Text(text, color = Color.White, fontSize = 20.sp)
+    Text(text, color = Color.White, fontSize = 24.sp)
 }
 
 @Composable

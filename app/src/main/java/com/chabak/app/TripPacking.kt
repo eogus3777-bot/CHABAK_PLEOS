@@ -2,7 +2,17 @@ package com.chabak.app
 
 import java.time.LocalDate
 
-internal data class PackItem(val id: String, val name: String, val group: String, val description: String = "")
+internal enum class PackingPriority(val label: String) {
+    ESSENTIAL("필수"), RECOMMENDED("추천"), VERIFY("현장 확인"), CUSTOM("직접 추가")
+}
+
+internal data class PackItem(
+    val id: String,
+    val name: String,
+    val group: String,
+    val description: String = "",
+    val priority: PackingPriority = PackingPriority.RECOMMENDED
+)
 
 internal data class PackingObservation(
     val region: String,
@@ -24,15 +34,17 @@ internal fun Trip.packingSeason(): String = when (visitDate.monthValue) {
 
 internal fun tripPackItems(trip: Trip, place: Place?, observation: PackingObservation?, today: LocalDate): List<PackItem> {
     val days = trip.nights + 1
+    fun essential(id: String, name: String, group: String, description: String) =
+        PackItem(id, name, group, description, PackingPriority.ESSENTIAL)
     val basic = listOf(
-        PackItem("mat", "차박 매트", "잠자리", "접은 좌석의 틈과 높이 차를 줄여 주세요."),
-        PackItem("pillow", "베개 ${trip.people}개", "잠자리", "한 사람에 하나씩 준비해 주세요."),
-        PackItem("blanket", "침구 ${trip.people}인분", "잠자리", "각자 쓸 침낭이나 담요를 준비해 주세요."),
-        PackItem("water", "식수 약 ${trip.people * days * 2}L (예비 포함)", "먹거리", "인원과 방문 일수로 계산한 준비량이에요. 활동량과 보급 계획에 맞춰 조절하세요."),
-        PackItem("food", "식사 / 간식 ${trip.people}명 · ${days}일분", "먹거리", "도착일과 귀가일에 먹을 식사도 챙겨 주세요."),
-        PackItem("light", "충전식 랜턴", "기타", "밤에 이동할 때 쓸 수 있도록 출발 전에 충전하세요."),
-        PackItem("tissue", "휴지 · 쓰레기봉투", "기타", "현장 배출 규칙을 확인하고 수거할 봉투를 챙기세요."),
-        PackItem("charger", "충전 케이블 · 보조배터리", "기타", "휴대기기용 케이블과 미리 충전한 보조배터리를 챙기세요.")
+        essential("mat", "차박 매트", "잠자리", "접은 좌석의 틈과 높이 차를 줄여 주세요."),
+        essential("pillow", "베개 ${trip.people}개", "잠자리", "한 사람에 하나씩 준비해 주세요."),
+        essential("blanket", "침구 ${trip.people}인분", "잠자리", "각자 쓸 침낭이나 담요를 준비해 주세요."),
+        essential("water", "식수 약 ${trip.people * days * 2}L (예비 포함)", "먹거리", "인원과 방문 일수로 계산한 준비량이에요. 활동량과 보급 계획에 맞춰 조절하세요."),
+        essential("food", "식사 / 간식 ${trip.people}명 · ${days}일분", "먹거리", "도착일과 귀가일에 먹을 식사도 챙겨 주세요."),
+        essential("light", "충전식 랜턴", "기타", "밤에 이동할 때 쓸 수 있도록 출발 전에 충전하세요."),
+        essential("tissue", "휴지 · 쓰레기봉투", "기타", "현장 배출 규칙을 확인하고 수거할 봉투를 챙기세요."),
+        essential("charger", "충전 케이블 · 보조배터리", "기타", "휴대기기용 케이블과 미리 충전한 보조배터리를 챙기세요.")
     )
     val seasonal = when (trip.packingSeason()) {
         "겨울" -> listOf(
@@ -60,13 +72,16 @@ internal fun tripPackItems(trip: Trip, place: Place?, observation: PackingObserv
         }
     }.orEmpty()
     val campsite = place?.let(::campsitePackItems).orEmpty()
-    val extras = trip.extraItems.map { PackItem("custom_$it", it, "추가") }
+    val extras = trip.extraItems.map { PackItem("custom_$it", it, "추가", priority = PackingPriority.CUSTOM) }
     return basic + seasonal + weatherItems + campsite + extras
 }
 
 internal fun campsitePackItems(camp: Place): List<PackItem> {
     val tags = camp.natureTags()
-    fun item(id: String, name: String, description: String) = PackItem("site_${id}_${camp.id}", name, "장소", description)
+    fun item(id: String, name: String, description: String, priority: PackingPriority = PackingPriority.RECOMMENDED) =
+        PackItem("site_${id}_${camp.id}", name, "장소", description, priority)
+    fun verify(id: String, name: String, description: String) =
+        item(id, name, description, PackingPriority.VERIFY)
     val terrain = if (camp.live || camp.kind != CampingPlaceKind.CAMPGROUND) buildList {
         if ("계곡" in tags) add(item("valley", "계곡 지형 · 미끄럼 방지 신발 · 방수 파우치", "물가의 젖은 바닥과 짐이 젖는 상황에 대비하세요."))
         if ("바다" in tags || "해변" in tags) add(item("sea", "바닷가 바람 대비 · 바람막이 · 여벌 옷", "바람이 강한 해안에서 겹쳐 입을 옷을 챙기세요."))
@@ -77,16 +92,16 @@ internal fun campsitePackItems(camp: Place): List<PackItem> {
 
     val facilities = buildList {
         when (camp.toiletCount ?: camp.permit?.toiletAvailable?.let { if (it) 1 else 0 }) {
-            null -> add(item("toilet_check", "화장실 이용 여부 확인 필요", "현장에 화장실이 있는지와 야간 개방 시간을 확인하세요."))
-            0 -> add(item("toilet_nearby", "인근 이용 가능한 화장실 확인", "등록된 화장실이 0개인 장소는 가까운 대체 시설을 찾아 두세요."))
+            null -> add(verify("toilet_check", "화장실 이용 여부 확인 필요", "현장에 화장실이 있는지와 야간 개방 시간을 확인하세요."))
+            0 -> add(verify("toilet_nearby", "인근 이용 가능한 화장실 확인", "등록된 화장실이 0개인 장소는 가까운 대체 시설을 찾아 두세요."))
         }
         when (camp.showerCount) {
-            null -> add(item("shower_check", "샤워실 이용 여부 확인 필요", "샤워실 운영 여부와 이용 시간을 확인하세요."))
+            null -> add(verify("shower_check", "샤워실 이용 여부 확인 필요", "샤워실 운영 여부와 이용 시간을 확인하세요."))
             0 -> add(item("shower_alternative", "간이 세면용품 · 물티슈 준비", "샤워실이 등록되지 않은 장소에서는 대체 세면 방법을 준비하세요."))
         }
         if (camp.sinkCount == 0) add(item("sink_alternative", "세척용 물과 빈 물통 준비", "개수대가 등록되지 않은 장소의 세척·폐수 처리 규칙을 확인하세요."))
         when (camp.campingPower) {
-            null -> add(item("power_check", "캠핑용 전기 사용 조건 확인 필요", "사이트의 콘센트 제공 여부와 허용 용량을 운영자에게 확인하세요."))
+            null -> add(verify("power_check", "캠핑용 전기 사용 조건 확인 필요", "사이트의 콘센트 제공 여부와 허용 용량을 운영자에게 확인하세요."))
             false -> add(item("power_alternative", "캠핑용 보조전원 준비", "현장 콘센트 없이 쓸 기기를 미리 충전하세요."))
             true -> Unit
         }
@@ -96,11 +111,11 @@ internal fun campsitePackItems(camp: Place): List<PackItem> {
                 add(item("ev_nearby", "인근 충전소 경유 계획", "이용 시간과 차량에 맞는 충전기 종류를 확인하세요."))
             camp.onsiteEvCharger == false && camp.nearbyEvCharger == false ->
                 add(item("ev_route", "이동 경로에서 전기차 충전 지점 확인", "캠핑장에 도착하기 전 이용할 충전소를 정해 두세요."))
-            else -> add(item("ev_check", "내부·인근 전기차 충전소 확인 필요", "캠핑 사이트의 전기 시설과 차량 충전소를 구분해 확인하세요."))
+            else -> add(verify("ev_check", "내부·인근 전기차 충전소 확인 필요", "캠핑 사이트의 전기 시설과 차량 충전소를 구분해 확인하세요."))
         }
         when (camp.overnightAllowed) {
-            null -> add(item("overnight_check", "차량 내 숙박 허용 여부 확인 필요", "차량 안에서 자도 되는지 예약 전에 운영자에게 확인하세요."))
-            false -> add(item("overnight_alternative", "차량 숙박을 허용하는 차박지 확인", "차량 숙박이 허용되는 다른 장소를 선택해 주세요."))
+            null -> add(verify("overnight_check", "차량 내 숙박 허용 여부 확인 필요", "차량 안에서 자도 되는지 예약 전에 운영자에게 확인하세요."))
+            false -> add(verify("overnight_alternative", "차량 숙박을 허용하는 차박지 확인", "차량 숙박이 허용되는 다른 장소를 선택해 주세요."))
             true -> Unit
         }
         val permit = camp.permit

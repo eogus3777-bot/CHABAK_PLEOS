@@ -2,14 +2,11 @@ package com.chabak.app
 
 import android.content.Context
 import android.content.Intent
-import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
-import org.json.JSONTokener
 
 internal object GleoCampingAction {
     const val ACTION = "SEARCH_CAMPING_PLACE"
-    private const val RESPONSE_ACTION = "ai.pleos.playground.intent.action.APP_ACTION_RESPONSE"
     private val regions = setOf("전국", "경기", "강원", "충청", "경상", "전라", "제주")
     private val environments = setOf("숲", "산", "계곡", "바다", "강", "호수")
 
@@ -29,15 +26,25 @@ internal object GleoCampingAction {
     fun handle(
         context: Context,
         intent: Intent,
+        reply: (GleoResponse) -> Unit = { GleoContract.reply(context, ACTION, it) },
         search: (Query, (Outcome, List<String>) -> Unit) -> Unit
     ) {
         if (intent.action != ACTION) return
+        val delivered = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun respond(status: String, message: String, reason: String, places: List<String> = emptyList()) {
+            if (!delivered.compareAndSet(false, true)) return
+            val details = JSONObject()
+            if (reason in setOf("FOUND", "NO_RESULTS")) {
+                details.put("resultCount", places.size).put("placeNames", JSONArray(places.take(3)))
+            }
+            reply(GleoResponse(status, message, reason, details))
+        }
 
         val query = try {
             val parameters = parameters(intent)
             val region = parameters.readText("region")
             if (region.isEmpty()) {
-                respond(context, "asking", "A region is required to search for campsites.", "MISSING_REGION")
+                respond("asking", "A region is required to search for campsites.", "MISSING_REGION")
                 return
             }
             require(region in regions)
@@ -52,80 +59,29 @@ internal object GleoCampingAction {
                 parameters.readFlag("store")
             )
         } catch (_: Exception) {
-            respond(context, "fail", "The campsite search parameters are invalid.", "INVALID_PARAMETERS")
+            respond("fail", "The campsite search parameters are invalid.", "INVALID_PARAMETERS")
             return
         }
 
-        search(query) { outcome, places ->
-            when (outcome) {
-                Outcome.FOUND -> respond(
-                    context, "success", "Matching registered campsites are shown in CHABAK.", "FOUND", places
-                )
-                Outcome.NO_RESULTS -> respond(context, "fail", "No registered campsites match the requested criteria.", "NO_RESULTS")
-                Outcome.SERVICE_FAILURE -> respond(context, "fail", "The campsite recommendation service is unavailable.", "SERVICE_FAILURE")
-                Outcome.SUPERSEDED -> respond(context, "fail", "A newer campsite search replaced this request.", "SUPERSEDED")
-            }
-        }
-    }
-
-    private fun parameters(intent: Intent): JSONObject {
-        val extras = intent.extras ?: return JSONObject()
-        if (!extras.containsKey("ACTION_PARAM")) {
-            // The Gleo Intent guide also describes parameters as individual extras.
-            return JSONObject().apply {
-                for (name in listOf("region", "district", "nature", "toilet", "electric", "store")) {
-                    @Suppress("DEPRECATION")
-                    val value = extras.get(name)
-                    if (value != null) put(name, value)
+        try {
+            search(query) { outcome, places ->
+                when (outcome) {
+                    Outcome.FOUND -> respond(
+                        "success", "Matching registered campsites are shown in CHABAK.", "FOUND", places
+                    )
+                    Outcome.NO_RESULTS -> respond("success", "The search completed, but no registered campsites match the requested criteria.", "NO_RESULTS")
+                    Outcome.SERVICE_FAILURE -> respond("fail", "The campsite recommendation service is unavailable.", "SERVICE_FAILURE")
+                    Outcome.SUPERSEDED -> respond("fail", "A newer campsite search replaced this request.", "SUPERSEDED")
                 }
             }
-        }
-
-        val raw = requireNotNull(extras.getString("ACTION_PARAM"))
-        val first = JSONTokener(raw).nextValue()
-        return when (first) {
-            is JSONObject -> first
-            is String -> JSONObject(first)
-            else -> throw IllegalArgumentException("Expected a parameter object")
+        } catch (_: Exception) {
+            respond("fail", "The campsite recommendation service is unavailable.", "SERVICE_FAILURE")
         }
     }
 
-    private fun JSONObject.readText(name: String): String {
-        if (!has(name)) return ""
-        val value = get(name)
-        require(value is String)
-        return value.trim()
-    }
+    private fun parameters(intent: Intent): JSONObject =
+        GleoContract.parameters(intent, listOf("region", "district", "nature", "toilet", "electric", "store"))
 
-    private fun JSONObject.readFlag(name: String): Boolean {
-        if (!has(name)) return false
-        val value = get(name)
-        require(value is Boolean)
-        return value
-    }
-
-    private fun respond(
-        context: Context,
-        status: String,
-        message: String,
-        reason: String,
-        places: List<String> = emptyList()
-    ) {
-        val result = JSONObject().put("reason", reason)
-        if (places.isNotEmpty()) {
-            result.put("resultCount", places.size)
-            result.put("placeNames", JSONArray(places.take(3)))
-        }
-        val response = JSONObject()
-            .put("functionName", ACTION)
-            .put("status", status)
-            .put("message", message)
-            .put("data", JSONArray().put(result).toString())
-
-        context.sendBroadcast(Intent(RESPONSE_ACTION).apply {
-            putExtra("packageName", context.packageName)
-            putExtra("response", response.toString())
-        })
-        Log.d("ChabakGleo", "$ACTION status=$status reason=$reason count=${places.size}")
-    }
+    private fun JSONObject.readText(name: String): String = GleoContract.text(this, name)
+    private fun JSONObject.readFlag(name: String): Boolean = GleoContract.flag(this, name)
 }

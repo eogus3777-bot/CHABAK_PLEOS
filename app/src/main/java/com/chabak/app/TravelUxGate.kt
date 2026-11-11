@@ -3,10 +3,16 @@ package com.chabak.app
 import android.car.Car
 import android.car.drivingstate.CarUxRestrictions
 import android.car.drivingstate.CarUxRestrictionsManager
+import android.car.VehicleGear
+import android.car.VehiclePropertyIds
+import android.car.hardware.CarPropertyValue
+import android.car.hardware.property.CarPropertyManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 internal enum class TravelInteraction { ALLOWED, RESTRICTED, UNKNOWN }
 
@@ -22,6 +28,7 @@ internal class TravelUxGate(private val context: Context) : AutoCloseable {
     private val automotive = context.packageManager.hasSystemFeature(PackageManager.FEATURE_AUTOMOTIVE)
     private var car: Car? = null
     private var manager: CarUxRestrictionsManager? = null
+    private var properties: CarPropertyManager? = null
     private var active = false
 
     fun start(onChange: (TravelInteraction) -> Unit) {
@@ -33,6 +40,7 @@ internal class TravelUxGate(private val context: Context) : AutoCloseable {
                 if (!active) return@createCar
                 manager?.let { runCatching { it.unregisterListener() } }
                 manager = null
+                properties = null
                 if (ready) {
                     try {
                         val restrictions = service.getCarManager(Car.CAR_UX_RESTRICTION_SERVICE) as? CarUxRestrictionsManager
@@ -40,7 +48,11 @@ internal class TravelUxGate(private val context: Context) : AutoCloseable {
                             if (active) onChange(travelInteraction(true, state.isRequiresDistractionOptimization))
                         }
                         manager = restrictions
+                        properties = runCatching {
+                            service.getCarManager(Car.PROPERTY_SERVICE) as? CarPropertyManager
+                        }.getOrNull()
                     } catch (_: RuntimeException) {
+                        manager?.let { runCatching { it.unregisterListener() } }
                         manager = null
                     }
                 }
@@ -60,10 +72,23 @@ internal class TravelUxGate(private val context: Context) : AutoCloseable {
         return travelInteraction(automotive, restriction)
     }
 
+    suspend fun isParked(): Boolean {
+        val reader = properties ?: return false
+        if (!active || !automotive || current() != TravelInteraction.ALLOWED) return false
+        val parked = withContext(Dispatchers.IO) {
+            try {
+                val gear = reader.getProperty<Int>(VehiclePropertyIds.GEAR_SELECTION, 0)
+                gear?.status == CarPropertyValue.STATUS_AVAILABLE && gear.value == VehicleGear.GEAR_PARK
+            } catch (_: RuntimeException) { false }
+        }
+        return parked && active && current() == TravelInteraction.ALLOWED
+    }
+
     override fun close() {
         active = false
         manager?.let { runCatching { it.unregisterListener() } }
         manager = null
+        properties = null
         car?.let { runCatching { it.disconnect() } }
         car = null
     }
