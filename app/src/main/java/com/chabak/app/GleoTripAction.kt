@@ -75,7 +75,7 @@ internal object GleoTripAction {
                         val reason = start()
                         val success = reason == "STARTED" || reason == "ALREADY_STARTED"
                         val message = when (reason) {
-                            "STARTED", "ALREADY_STARTED" -> "The CHABAK camping stay is active; no vehicle controls were changed."
+                            "STARTED", "ALREADY_STARTED" -> "The CHABAK camping stay is active. Setup recommendations and consented lighting checks continue in CHABAK."
                             "VEHICLE_RESTRICTED" -> "The stay cannot start until parked interaction is permitted."
                             "TRIP_ARCHIVED" -> "An archived trip cannot be started."
                             "ANOTHER_TRIP_ACTIVE" -> "Another camping stay is already active."
@@ -83,7 +83,8 @@ internal object GleoTripAction {
                             else -> "The camping stay could not be started."
                         }
                         reply(GleoResponse(if (success) "success" else "fail", message, reason,
-                            JSONObject().put("operation", "START_STAY").put("vehicleControlPerformed", false)))
+                            JSONObject().put("operation", "START_STAY").put("vehicleControlPerformed", false)
+                                .put("setup", if (reason == "STARTED") "CHECKS_PENDING" else "EXISTING_STAY")))
                     }
                     "READ_ENERGY" -> {
                         val reading = energy()

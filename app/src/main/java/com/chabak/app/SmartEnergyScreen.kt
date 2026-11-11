@@ -123,8 +123,7 @@ internal fun SmartEnergyScreen(trip: Trip, readings: VehicleEnergy, save: (Strin
                 EnergyWarning(plan, soc, simulated)
                 EnergyLine("배터리 용량 · ${capacity?.let { "${decimal(it)} kWh (${if (simulated) "가정" else "공칭"})" } ?: readings.capacityKwh.missingLabel()}")
                 if (!simulated) {
-                    EnergyLine("주행 가능 거리 · 미지원")
-                    EnergyLine("충전 중 여부 · 미지원")
+                    EnergyLine("주행 거리·충전 중 여부 · 미지원")
                     EnergyLine("충전 스위치 · ${readings.chargeSwitch.valueOrNull()?.let { if (it) "켜짐" else "꺼짐" } ?: readings.chargeSwitch.missingLabel()}")
                 }
                 Text(
@@ -144,7 +143,7 @@ internal fun SmartEnergyScreen(trip: Trip, readings: VehicleEnergy, save: (Strin
                         else "숙박 소비량·사용 시간 · 계산 불가 (측정 소비전력 미확인)")
                 }
                 EnergyLine("실제 귀가 필요 에너지 · 확인 필요")
-                EnergyLine("잔량 경고는 차박 중·에너지 화면이 보일 때 확인할 수 있어요. 백그라운드에서는 알림을 보장하지 않아요.")
+                EnergyLine("잔량 경고 · 앱 화면에서 확인 (백그라운드 알림 미보장)")
                 if (editable) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                         ActionButton(if (settingsOpen) "설정 닫기" else "계획 설정", Modifier.weight(1f), filled = false) {

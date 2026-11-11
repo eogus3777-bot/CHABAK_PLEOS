@@ -155,7 +155,7 @@ internal fun LightingPreview() {
 internal fun GleoInformation() {
     GlassPanel(Modifier.fillMaxSize()) {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-            SectionTitle("Gleo", "음성으로 더 편하게 이용하세요")
+            SectionTitle("Gleo")
             Canvas(Modifier.fillMaxWidth().height(130.dp)) {
                 val values = listOf(.15f,.3f,.5f,.8f,.4f,1f,.7f,.35f,.65f,.25f,.15f)
                 values.forEachIndexed { index, height ->
@@ -164,12 +164,10 @@ internal fun GleoInformation() {
                         Offset(x, size.height * (.5f + height * .4f)), 8.dp.toPx(), androidx.compose.ui.graphics.StrokeCap.Round)
                 }
             }
-            Text("음성 명령 안내 · 정적인 파형", color = ChabakDesign.accent, fontSize = 24.sp)
-            Text("Gleo 실제 음성 연결 미검증 · 듣는 중 상태가 아닙니다.", color = Color.White, fontSize = 24.sp)
+            Text("Gleo 음성 연결 미검증", color = ChabakDesign.accent, fontSize = 25.sp)
             listOf("차박지 추천해 줘", "근처 양조장 찾아줘", "이번 주 오일장 알려줘", "차박 시작해 줘", "배터리 얼마나 남았어?").forEach {
                 Text("“$it”", color = Color.White, fontSize = 28.sp)
             }
-            Text("명령 예시의 실제 인식은 확인 필요 · 기존 App Action 3개 연결 유지", color = ChabakDesign.muted, fontSize = 21.sp)
         }
     }
 }

@@ -4,10 +4,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.os.SystemClock
+import android.accessibilityservice.AccessibilityService
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -127,6 +131,9 @@ class GleoLiveCallbackProbe {
                 }
                 observations.put(reply)
             }
+            if (InstrumentationRegistry.getArguments().getString("liveSearch") == "true") {
+                verifyLiveSearches(received)
+            }
             val proof = JSONObject().put("transport", "installed activity -> Android dynamic test receiver")
                 .put("spokenVoiceTest", false).put("callbacks", observations)
             val folder = File(context.filesDir, "qa-step261").apply { mkdirs() }
@@ -134,5 +141,72 @@ class GleoLiveCallbackProbe {
         } finally {
             context.unregisterReceiver(receiver)
         }
+    }
+
+    private fun verifyLiveSearches(received: LinkedBlockingQueue<String>) {
+        val prefs = context.getSharedPreferences("chabak_3", Context.MODE_PRIVATE)
+        val originalRegion = prefs.getString("region", null)
+        val folder = File(context.filesDir, "qa-final").apply { mkdirs() }
+        val evidence = JSONObject().put("spokenVoiceTest", false)
+        val parameters = JSONObject().put("region", "경기").put("district", "가평")
+            .put("nature", "숲").put("toilet", true).put("electric", true).put("store", true)
+        received.clear()
+        try {
+            val cold = command(GleoCampingAction.ACTION).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                .putExtra("ACTION_PARAM", parameters.toString())
+            val started = SystemClock.uptimeMillis()
+            instrumentation.runOnMainSync { context.startActivity(cold) }
+            run {
+                val camping = JSONObject(received.poll(7, TimeUnit.SECONDS) ?: error("No live campsite callback"))
+                val elapsed = SystemClock.uptimeMillis() - started
+                assertEquals("success", camping.getString("status"))
+                val campingData = JSONArray(camping.getString("data")).getJSONObject(0)
+                assertEquals("FOUND", campingData.getString("reason"))
+                assertTrue(campingData.getInt("resultCount") in 1..5)
+                assertTrue(elapsed < 7_000)
+                screenshot(folder, "gleo-camping-live.png")
+                evidence.put("camping", JSONObject().put("request", parameters).put("callback", camping)
+                    .put("coldLaunch", true).put("elapsedMs", elapsed))
+
+                // Exercise a real background-to-foreground delivery through onNewIntent.
+                instrumentation.uiAutomation.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                val tripParameters = JSONObject().put("category", "MARKET").put("weekend", true)
+                val tripStarted = SystemClock.uptimeMillis()
+                instrumentation.runOnMainSync {
+                    context.startActivity(command(GleoTripAction.SEARCH).putExtra("ACTION_PARAM", tripParameters.toString()))
+                }
+                val trip = JSONObject(received.poll(7, TimeUnit.SECONDS) ?: error("No live trip-place callback"))
+                val tripElapsed = SystemClock.uptimeMillis() - tripStarted
+                assertEquals("success", trip.getString("status"))
+                val dates = MarketCalendar.thisWeekend(java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")))
+                val tripData = JSONArray(trip.getString("data")).getJSONObject(0)
+                assertEquals(dates.start.toString(), tripData.getString("dateStart"))
+                assertEquals(dates.end.toString(), tripData.getString("dateEnd"))
+                assertFalse(tripData.getBoolean("openingConfirmed"))
+                assertTrue(tripElapsed < 7_000)
+                screenshot(folder, "gleo-market-live.png")
+                evidence.put("trip", JSONObject().put("request", tripParameters).put("callback", trip)
+                    .put("fromBackground", true).put("elapsedMs", tripElapsed))
+            }
+        } finally {
+            instrumentation.runOnMainSync {
+                val monitor = ActivityLifecycleMonitorRegistry.getInstance()
+                listOf(Stage.RESUMED, Stage.STARTED, Stage.PAUSED, Stage.STOPPED).flatMap {
+                    monitor.getActivitiesInStage(it)
+                }.filterIsInstance<MainActivity>().distinct().forEach { it.finishAndRemoveTask() }
+            }
+            instrumentation.waitForIdleSync()
+            val editor = prefs.edit()
+            if (originalRegion == null) editor.remove("region") else editor.putString("region", originalRegion)
+            assertTrue(editor.commit())
+            evidence.put("originalRegionRestored", prefs.getString("region", null) == originalRegion)
+            File(folder, "gleo-live-searches.json").writeText(evidence.toString(2))
+        }
+    }
+
+    private fun screenshot(folder: File, name: String) {
+        val image = requireNotNull(instrumentation.uiAutomation.takeScreenshot())
+        File(folder, name).outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        image.recycle()
     }
 }

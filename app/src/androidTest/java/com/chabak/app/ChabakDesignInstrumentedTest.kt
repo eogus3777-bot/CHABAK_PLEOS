@@ -15,8 +15,8 @@ class ChabakDesignInstrumentedTest {
 
     @Test fun gleoPanelDoesNotPresentAnUnverifiedListeningSession() {
         compose.setContent { GleoInformation() }
-        compose.onNodeWithText("Gleo 실제 음성 연결 미검증 · 듣는 중 상태가 아닙니다.").assertExists()
-        compose.onNodeWithText("음성 명령 안내 · 정적인 파형").assertExists()
+        compose.onNodeWithText("Gleo 음성 연결 미검증").assertExists()
+        compose.onNodeWithText("녹음 시작").assertDoesNotExist()
     }
 
     @Test fun restrictedRailCannotOpenParkedOnlyScreens() {
